@@ -1,4 +1,4 @@
-# Pixel Intelligence Partition Extraction & Analysis
+# Pixel AI Intelligence Partition Extraction & Analysis
 
 ## 📦 Contents
 - Pixel partition extraction workflow (WSL2 + F2FS)
@@ -10,40 +10,7 @@
   
 ---
 
-## 1. Converting Sparse Image to Raw Image
-
-### 1. Download the Factory Image (macOS)
-- From Google's [Pixel Factory Image](https://developers.google.com/android/images) site, download the factory image ZIP to your macOS device.
-    - e.g. `mustang-bd1a.250702.001-factory-c37e6f51.zip`
-- Extract the large image ZIP from that.
-    - e.g. `image-mustang-bd1a.250702.001.zip`
-- Extract the `userdata_exp.ai.img` from that.
-
-### 2. Convert Sparse to Raw Using `simg2img` (macOS)
-- On macOS, install the `simg2img` tool via this command:
-  ```bash
-  brew install simg2img
-  ```
-- Run the following command to convert the sparse image:
-  ```bash
-  simg2img userdata_exp.ai.img userdata_exp_raw.ai.img
-  ```
-- This produces a raw image suitable for mounting.
-
-### 3. Inspect Raw Image Format (macOS)
-- Use the `file -s` command to inspect the raw image format:
-  ```bash
-  file -s userdata_exp_raw.ai.img
-  ```
-- Expected output:
-  ```bash
-  userdata_exp_raw.ai.img: F2FS filesystem data, UUID=... , volume name "/intelligence"
-  ```
-- In our case, the output revealed it was an F2FS image — critical for knowing how to mount it later.
-
----
-
-## 2. Enabling/Installing WSL2 on Windows
+## 💻 Enabling/Installing WSL2 on Windows
 
 ### 1. Enable Virtualization Support
 - Open PowerShell as Administrator and run the following commands:
@@ -73,7 +40,40 @@
 
 ---
 
-## 3. Mounting the `/intelligence` Partition in WSL2 (Windows)
+## 🗜️ Converting Sparse Image to Raw Image
+
+### 1. Download the Pixel Factory Image (Windows)
+- From Google's [Pixel Factory Image](https://developers.google.com/android/images) site, download the factory image zip to your Windows device.
+    - e.g. `mustang-bd1a.250702.001-factory-c37e6f51.zip`
+- Extract the large image zip from that.
+    - e.g. `image-mustang-bd1a.250702.001.zip`
+- Extract the `userdata_exp.ai.img` from that image zip.
+
+### 2. Convert Sparse to Raw Using `simg2img` (macOS)
+- On WSL, install the `simg2img` tool via this command:
+  ```bash
+  sudo apt install android-sdk-libsparse-utils
+  ```
+- Run the following command to convert the sparse image:
+  ```bash
+  simg2img userdata_exp.ai.img userdata_exp_raw.ai.img
+  ```
+- This produces a raw image suitable for mounting.
+
+### 3. Inspect Raw Image Format (macOS)
+- Use the `file -s` command to inspect the raw image format:
+  ```bash
+  file -s userdata_exp_raw.ai.img
+  ```
+- Expected output:
+  ```bash
+  userdata_exp_raw.ai.img: F2FS filesystem data, UUID=... , volume name "/intelligence"
+  ```
+- In our case, the output revealed it was an F2FS image — critical for knowing how to mount it later.
+
+---
+
+## 📂 Mounting the `/intelligence` Partition in WSL2
 
 ### 1. Custom Kernel with F2FS Support
 - Download a pre‑built WSL2 kernel with F2FS enabled (`bzImage-x64v3`) to avoid compiling from source.
@@ -81,7 +81,7 @@
 - Rename it and add the path in `C:\Users\<YourName>\.wslconfig`:
   ```
   [wsl2]
-  kernel=kernel=D:\SW\P10PXL\wsl-f2fs-kernel
+  kernel=kernel=D:\\SW\\P10PXL\\wsl-f2fs-kernel
   ```
 - Shutdown WSL:
   ```powershell
@@ -104,7 +104,7 @@ sudo mount -t f2fs -o loop /mnt/d/SW/P10PXL/userdata_exp_raw.ai.img /mnt/pixel
 
 ---
 
-## 4. Copying files from mounted image to Windows (WSL) 📁
+## 📁 Copying files from mounted image to Windows
 - Create a Windows‑accessible folder:
 ```bash
 mkdir -p /mnt/d/SW/P10PXL/extract
@@ -122,7 +122,7 @@ find /mnt/d/SW/P10PXL/extract -mindepth 1 -printf '.' | wc -c
 
 ---
 
-## 4. Fingerprinting Model Files (WSL)
+## 🧠 Fingerprinting Model Files (Optional)
 - Ran a script to scan `.tflite`, `.binarypb`, and `data0` for keywords:
 ```bash
 { for f in $(find /mnt/pixel -type f -name "*.tflite"); do
@@ -145,15 +145,19 @@ find /mnt/d/SW/P10PXL/extract -mindepth 1 -printf '.' | wc -c
 
 ---
 
-## 5. Analysis Summary
-From the fingerprinting:
-- **High‑value Gemini/AICore candidates**:
-    - `cross_layer_*` (multimodal transformer fusion layers)
-    - `dot_attention_global_*` (attention heads)
-    - `image_encoder-*`, `image_adaptor-*`, `ple_proj-*` (vision embedding pipeline)
-    - [`manifest.binarypb`](https://manifest.binarypb), [`config.binarypb`](https://config.binarypb), `data0` (model manifest/config/weights)
-- **Lower‑priority**:
-    - `audio_*` models (speech/audio processing, likely unrelated to Gemini issue)
+## 📊 Analysis Summary
+There are a total of 192 files in the image.
+![Image Extract](https://github.com/user-attachments/assets/cef952d1-1c9c-4abb-90a6-792557565c2c)
+- **`.tflite` (188 files):** — TensorFlow Lite models used for on-device inference. These are optimized neural network models for tasks like vision, audio, and multimodal processing.
+    - `audio_adapter_*`, `audio_layer_*`: Handle audio preprocessing and feature extraction.
+    - `cross_layer_*` (32 files): Multimodal transformer fusion layers that combine inputs from different modalities (e.g., image + text).
+    - `dot_attention_global_*` (130 files): Attention heads used in transformer architectures.
+    - `image_adaptor-*`, `image_encoder-*`, `ple_proj-*`: Vision embedding pipeline components that convert raw image data into feature vectors.
+- **`.binarypb` (3 files):** Protocol buffer files used to store structured metadata and configuration.
+    - `checkpoint.binarypb`: Likely used to track model training or versioning checkpoints.
+    - `config.binarypb`: Contains configuration parameters for model execution or runtime behavior.
+    - `manifest.binarypb`: Describes the model bundle contents, including file paths, types, and relationships.
+- **`data0` file (1.5 GB)** — A large shared weight blob containing the actual trained parameters for the models. This file is referenced by the `.binarypb` manifest and config files and used by the `.tflite` models during inference.
 
 ---
 
@@ -163,3 +167,16 @@ You now have:
 - A method to mount and extract `/intelligence` from a Pixel factory image in WSL2.
 - A clean copy of all files into Windows.
 - A fingerprinting process to identify which files are likely part of Gemini Nano / AICore.
+
+## ❓ Open Questions
+While we've successfully extracted and fingerprinted the `/intelligence` partition, it's still unclear whether these files can be placed back onto a Pixel device in a specific path to enable Gemini Nano or AICore features.
+
+We know: 
+- On Pixel 10 series, there is a `/data/vendor/intelligence` folder/mount which has these `.tflite` and other such files.
+- On Pixel 9 series, [AI Core](https://play.google.com/store/apps/details?id=com.google.android.aicore) app stores AI Models somewhere under `/data/user/0/com.google.android.aicore` 
+  
+We don't yet know:
+- Whether simply copying the `.tflite`, `.binarypb`, and `data0` files to a devices will trigger AICore to load them.
+- If additional permissions, signatures, or system-level integration are required to activate these features.
+
+Further experimentation is needed to determine if these extracted models can be used to re-enable or sideload AI features on-device.
