@@ -1,0 +1,180 @@
+<#
+.SYNOPSIS
+    Windows Cleanup Toolkit
+.DESCRIPTION
+    Modular functions for safe cleanup of Windows component store, NVIDIA caches,
+    DriverStore audits, System Restore, pagefile tuning, and OEM driver cache.
+    Includes a master orchestrator with feature flags and logging.
+#>
+
+# Ensure log directory exists
+$global:CleanupLogRoot = "D:\Logs"
+if (!(Test-Path $global:CleanupLogRoot)) {
+    New-Item -ItemType Directory -Path $global:CleanupLogRoot | Out-Null
+}
+$global:CleanupLogFile = Join-Path $global:CleanupLogRoot ("Cleanup-{0:yyyyMMdd-HHmmss}.txt" -f (Get-Date))
+
+function Write-Log {
+    param([string]$Message)
+    $timestamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    $line = "[$timestamp] $Message"
+    Write-Host $line
+    Add-Content -Path $global:CleanupLogFile -Value $line
+}
+
+# --- 1. Component Store Cleanup ---
+function Invoke-WinSxSCleanup {
+    Write-Log "Running DISM component cleanup..."
+    DISM.exe /Online /Cleanup-Image /StartComponentCleanup
+    # Uncomment for aggressive cleanup (removes rollback ability)
+    # DISM.exe /Online /Cleanup-Image /StartComponentCleanup /ResetBase
+}
+
+# --- 2. NVIDIA Installer2 Cleanup ---
+function Invoke-NvidiaCleanup {
+    param(
+        [string]$InstallerPath = "C:\Program Files\NVIDIA Corporation\Installer2",
+        [string]$BackupPath = "D:\NVIDIA_Backup",
+        [switch]$DryRun
+    )
+
+    function Get-ComponentPrefix([string]$name) {
+        if ($name -match "^[^.]+") { return $Matches[0] } else { return $name }
+    }
+
+    if (!(Test-Path $InstallerPath)) {
+        Write-Log "Installer2 not found."
+        return
+    }
+
+    $items = Get-ChildItem $InstallerPath -Directory
+    $groups = $items | Group-Object { Get-ComponentPrefix $_.Name }
+
+    foreach ($group in $groups) {
+        $sorted = $group.Group | Sort-Object LastWriteTime -Descending
+        $keep = $sorted | Select-Object -First 1
+        $prune = $sorted | Select-Object -Skip 1
+
+        Write-Log "Component: $($group.Name) -> Keeping $($keep.Name)"
+        foreach ($p in $prune) {
+            if ($DryRun) {
+                Write-Log "[DRY-RUN] Would move $($p.FullName)"
+            } else {
+                $dest = Join-Path $BackupPath ("{0}\{1}" -f $group.Name, $p.Name)
+                New-Item (Split-Path $dest) -ItemType Directory -Force | Out-Null
+                Move-Item $p.FullName $dest -Force
+                Write-Log "Moved $($p.Name) to backup."
+            }
+        }
+    }
+}
+
+# --- 3. DriverStore Audit ---
+function Invoke-DriverAudit {
+    Write-Log "Listing staged drivers..."
+    Get-WindowsDriver -Online |
+        Select-Object Driver, ProviderName, ClassName, Version |
+        Sort-Object ProviderName, ClassName, Version |
+        Tee-Object -FilePath $global:CleanupLogFile -Append
+}
+
+# --- 4. System Restore / Shadow Copy ---
+function Get-ShadowStorage {
+    vssadmin list shadowstorage | Tee-Object -FilePath $global:CleanupLogFile -Append
+}
+
+function Set-ShadowStorage {
+    param(
+        [string]$Drive = "C:",
+        [string]$MaxSize = "5GB"
+    )
+    vssadmin resize shadowstorage /for=$Drive /on=$Drive /maxsize=$MaxSize
+    Write-Log "Resized shadow storage for $Drive to $MaxSize"
+}
+
+# --- 5. Pagefile Management ---
+function Set-PagefileSize {
+    param(
+        [int]$InitialMB = 2048,
+        [int]$MaximumMB = 8192
+    )
+    wmic pagefileset where name="C:\\pagefile.sys" set InitialSize=$InitialMB,MaximumSize=$MaximumMB
+    Write-Log "Pagefile set to $InitialMB MB min, $MaximumMB MB max."
+}
+
+# --- 6. OEM Driver Cache Audit ---
+function Invoke-OEMDriverAudit {
+    param([string]$CachePath = "C:\Drivers")
+
+    if (!(Test-Path $CachePath)) {
+        Write-Log "No OEM driver cache found at $CachePath"
+        return
+    }
+
+    $active = Get-WindowsDriver -Online
+    $cache = Get-ChildItem $CachePath -Directory
+
+    foreach ($c in $cache) {
+        if ($active.OriginalFileName -match $c.Name) {
+            Write-Log "KEEP? $($c.Name) -> Active driver present"
+        } else {
+            Write-Log "REDUNDANT? $($c.Name) -> Likely safe to remove"
+        }
+    }
+}
+
+# --- 7. Master Orchestrator ---
+function Invoke-SystemCleanup {
+    param(
+        [switch]$RunWinSxS,
+        [switch]$RunNvidia,
+        [switch]$RunDriverAudit,
+        [switch]$RunShadow,
+        [switch]$RunPagefile,
+        [switch]$RunOEMAudit,
+        [switch]$Interactive
+    )
+
+    Write-Log "=== Windows Cleanup Orchestrator Started ==="
+
+    function Confirm-Run($name) {
+        if ($Interactive) {
+            $resp = Read-Host "Run $name? (Y/N)"
+            return ($resp -match '^[Yy]')
+        } else {
+            return $true
+        }
+    }
+
+    if ($RunWinSxS -or ($Interactive -and (Confirm-Run "WinSxS Component Cleanup"))) {
+        Invoke-WinSxSCleanup
+    }
+
+    if ($RunNvidia -or ($Interactive -and (Confirm-Run "NVIDIA Installer2 Cleanup"))) {
+        Invoke-NvidiaCleanup -DryRun
+        Write-Log ">>> NVIDIA cleanup ran in DRY-RUN mode. Re-run without -DryRun to apply."
+    }
+
+    if ($RunDriverAudit -or ($Interactive -and (Confirm-Run "DriverStore Audit"))) {
+        Invoke-DriverAudit
+    }
+
+    if ($RunShadow -or ($Interactive -and (Confirm-Run "Shadow Storage Resize"))) {
+        Get-ShadowStorage
+        $resp = Read-Host "Resize shadow storage? Enter max size (e.g. 5GB) or press Enter to skip"
+        if ($resp) { Set-ShadowStorage -Drive C: -MaxSize $resp }
+    }
+
+    if ($RunPagefile -or ($Interactive -and (Confirm-Run "Pagefile Resize"))) {
+        $min = Read-Host "Enter pagefile min size (MB)"
+        $max = Read-Host "Enter pagefile max size (MB)"
+        if ($min -and $max) { Set-PagefileSize -InitialMB $min -MaximumMB $max }
+    }
+
+    if ($RunOEMAudit -or ($Interactive -and (Confirm-Run "OEM Driver Cache Audit"))) {
+        Invoke-OEMDriverAudit -CachePath "C:\Drivers"
+    }
+
+    Write-Log "=== Cleanup Orchestration Complete ==="
+    Write-Host "Log saved to $global:CleanupLogFile"
+}
