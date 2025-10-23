@@ -29,11 +29,10 @@ if (-not (Test-Path $Extractor)) {
 
 # Check for factory zip
 $FactoryZip = Get-ChildItem -Path $ScriptDir -Filter $FactoryPattern -File -ErrorAction SilentlyContinue | Select-Object -First 1
-if (-not $FactoryZip) {
-    Write-Err "No factory image matching pattern $FactoryPattern in $ScriptDir"
-    exit 1
-} else {
+if ($FactoryZip) {
     Write-Ok "Factory image zip found: $($FactoryZip.Name)"
+} else {
+    Write-Info "No factory image matching pattern $FactoryPattern in $ScriptDir. This is optional if an extracted/cached image-*.zip exists."
 }
 
 # Check for kernel zip
@@ -50,8 +49,14 @@ Write-Host ""
 Write-Host "==================== [2/4] Extracting Zips/Images ===================="
 # Look for cached image zip
 $ImageZip = Get-ChildItem -Path $ScriptDir -Filter $ImagePattern -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($ImageZip) { Write-Ok "Found cached image zip: $($ImageZip.FullName)" } else {
-    # If not found, extract factory zip using WinRAR
+if ($ImageZip) {
+    Write-Ok "Found cached image zip: $($ImageZip.FullName)"
+} else {
+    # If not found, attempt to extract factory zip
+    if (-not $FactoryZip) {
+        Write-Err "Neither a cached $ImagePattern nor a factory image ($FactoryPattern) were found in $ScriptDir. One of these is required."
+        exit 1
+    }
     Remove-Item -Path $ExtractLog -ErrorAction SilentlyContinue
     Write-Info "Extracting factory image to $ScriptDir"
     try {
