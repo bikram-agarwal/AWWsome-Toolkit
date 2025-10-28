@@ -2,21 +2,28 @@
 // CONFIG
 // =================================================================
 const CALENDAR_NAME = 'Entertainment';
-const TASK_LIST_NAME = 'Test';
-const UNWATCHED_COLOR_ID = '7';
-const DEFAULT_COLOR_ID = '11';
+const TASK_LIST_NAME = 'Media Backlog 🎞️';
+const UNWATCHED_COLOR_ID = '7';   // "Unwatched" color
+const DEFAULT_COLOR_ID = '11';    // Calendar's default color
 // =================================================================
 
 function syncCalendarAndTasks() {
   const today = new Date();
   const aWhileAgo = new Date();
-  aWhileAgo.setDate(today.getDate() - 10);
+  //aWhileAgo.setDate(today.getDate() - 10);
+  aWhileAgo.setMonth(today.getMonth() - 6);
 
   const calendar = getCalendarByName(CALENDAR_NAME);
   if (!calendar) return;
 
   const events = calendar.getEvents(aWhileAgo, today, { max: 2000, futureEvents: false });
-  const eventById = new Map(events.map(ev => [safeEventId(ev), ev]));
+  Logger.log(`Found ${events.length} events in range`);
+  events.forEach(ev => {
+  Logger.log(
+    `Event: ${buildTaskTitle(ev)} | Color: ${normalizeColor(ev.getColor())} | ` +
+    `${normalizeColor(ev.getColor()) === UNWATCHED_COLOR_ID ? 'Unwatched' : 'Watched'}`
+  );
+  });
 
   const taskList = getTaskListByName(TASK_LIST_NAME);
   if (!taskList) return;
@@ -24,61 +31,59 @@ function syncCalendarAndTasks() {
   const tasks = Tasks.Tasks.list(taskList.id, {
     showCompleted: true,
     showHidden: true
-  }).items || [];  const eventIdsWithTasks = new Set();
-  const tasksByEventId = new Map();
-
+  }).items || [];
+  Logger.log(`Found ${tasks.length} tasks in list "${TASK_LIST_NAME}"`);
   tasks.forEach(t => {
-    const evId = extractEventIdFromNotes(t.notes || '');
-    if (evId) {
-      eventIdsWithTasks.add(evId);
-      tasksByEventId.set(evId, t);
-    }
+    Logger.log(`Task: ${t.title} | Notes: ${t.notes || ''} | Status: ${t.status}`);
   });
+
+  const eventByKey = new Map(events.map(ev => [buildTaskTitle(ev), ev]));
+  const taskKeys = new Set(tasks.map(t => t.title));
+  const tasksByKey = new Map(tasks.map(t => [t.title, t]));
 
   let created = 0, deleted = 0, reset = 0;
 
   // === Phase 1: Create tasks for unwatched events ===
-  events.forEach(ev => {
-    if (ev.getColor() === UNWATCHED_COLOR_ID && !ev.isRecurringEvent()) {
-      const evId = safeEventId(ev);
-      if (!eventIdsWithTasks.has(evId)) {
-        if (insertTask(taskList.id, ev)) {
+  for (const ev of events) {
+    if (normalizeColor(ev.getColor()) === UNWATCHED_COLOR_ID && !ev.isRecurringEvent()) {
+      const key = buildTaskTitle(ev);
+      if (!taskKeys.has(key)) {
+        if (insertTask(taskList.id, ev, key)) {
           created++;
-          eventIdsWithTasks.add(evId);
+          taskKeys.add(key);
         }
       }
     }
-  });
+  }
 
   // === Phase 2: Delete tasks for events no longer matching ===
-  tasks.forEach(task => {
-    if (task.status === 'completed') return; // keep completed tasks
-    const evId = extractEventIdFromNotes(task.notes || '');
-    if (!evId) return;
-    const ev = eventById.get(evId);
-    if (!ev || ev.getColor() !== UNWATCHED_COLOR_ID) {
+  for (const task of tasks) {
+    if (task.status === 'completed') continue; // keep completed tasks
+    const ev = eventByKey.get(task.title);
+    if (!ev || normalizeColor(ev.getColor()) !== UNWATCHED_COLOR_ID) {
       if (deleteTask(taskList.id, task)) deleted++;
     }
-  });
+  }
 
   // === Phase 3: Completed tasks reset event color ===
-  tasks.forEach(task => {
-    if (task.status !== 'completed') return;
-    const evId = extractEventIdFromNotes(task.notes || '');
-    if (!evId) return;
-    const ev = eventById.get(evId);
-    if (ev && ev.getColor() === UNWATCHED_COLOR_ID) {
+  for (const task of tasks) {
+    if (task.status !== 'completed') continue;
+    const ev = eventByKey.get(task.title);
+    if (ev && normalizeColor(ev.getColor()) === UNWATCHED_COLOR_ID) {
       try {
         ev.setColor(DEFAULT_COLOR_ID);
         reset++;
         Logger.log(`*** RESET COLOR: ${ev.getTitle()}`);
+
+        // delete the completed task after resetting color
+        if (deleteTask(taskList.id, task)) deleted++;
       } catch (e) {
         Logger.log(`Error resetting color: ${e.message}`);
       }
     }
-  });
+  }
 
-  Logger.log(`Created: ${created}, Deleted: ${deleted}, Reset: ${reset}`);
+  Logger.log(`Summary — Created: ${created}, Deleted: ${deleted}, Reset: ${reset}`);
 }
 
 // -----------------------------------------------------------------
@@ -94,12 +99,15 @@ function getTaskListByName(name) {
   return resp.items?.find(list => list.title === name) || null;
 }
 
-function insertTask(taskListId, ev) {
+function buildTaskTitle(ev) {
   const tz = Session.getScriptTimeZone();
   const eventDate = Utilities.formatDate(ev.getStartTime(), tz, 'MM/dd/yyyy');
-  const taskTitle = `${ev.getTitle()} (${eventDate})`;
-  const notes = `On: ${ev.getLocation() || 'N/A'}\nEventID: ${safeEventId(ev)}`;
+  return `${ev.getTitle()} (${eventDate})`;
+}
 
+function insertTask(taskListId, ev, taskTitle) {
+  const icon = platformIcon(ev.getLocation());
+  const notes = `On: ${icon} ${ev.getLocation() || 'N/A'}`;
   const task = { title: taskTitle, notes, status: 'needsAction' };
   try {
     Tasks.Tasks.insert(task, taskListId);
@@ -122,14 +130,26 @@ function deleteTask(taskListId, task) {
   }
 }
 
-// Normalize Calendar event IDs so they’re stable
-function safeEventId(event) {
-  // Strip off any suffix after an underscore (recurring instances)
-  return event.getId().split('_')[0];
+// Normalize color: treat "" as DEFAULT_COLOR_ID
+function normalizeColor(color) {
+  return color === "" ? DEFAULT_COLOR_ID : color;
 }
 
-// Extract and normalize the EventID stored in task notes
-function extractEventIdFromNotes(notes) {
-  const m = notes.match(/EventID:\s*(.+)/);
-  return m ? m[1].trim().split('_')[0] : null;
+function platformIcon(location) {
+  if (!location) return '';
+  const lc = location.toLowerCase();
+
+  // Big streamers
+  if (lc.includes('netflix')) return '🍿';
+  if (lc.includes('prime') || lc.includes('amazon')) return '📦';
+  if (lc.includes('disney')) return '🪄';
+  if (lc.includes('hulu')) return '💚';
+  if (lc.includes('hbo') || lc.includes('max')) return '🎥';
+  if (lc.includes('apple')) return '🍎'; 
+  if (lc.includes('peacock')) return '🦚';
+  if (lc.includes('paramount')) return '🌄';
+  if (lc.includes('starz')) return '⭐';
+  if (lc.includes('game pass') || lc.includes('xbox')) return '🎮';
+  // Default: no icon
+  return '';
 }
