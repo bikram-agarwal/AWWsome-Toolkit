@@ -56,27 +56,47 @@ function syncCalendarAndTasks() {
     }
   }
 
-  // === Phase 2: Delete tasks for events no longer matching ===
+  // === Phase 2: Handle tasks whose events are missing or mismatched ===
   for (const task of tasks) {
-    if (task.status === 'completed') continue; // keep completed tasks
     const ev = eventByKey.get(task.title);
-    if (!ev || normalizeColor(ev.getColor()) !== UNWATCHED_COLOR_ID) {
+
+    if (!ev) {
+      // No corresponding event found
+      if (task.status === 'completed') {
+        // Completed + no event → delete
+        if (deleteTask(taskList.id, task)) deleted++;
+      } else {
+        // Incomplete + no event → leave it alone
+        Logger.log(`Skipping orphaned incomplete task: ${task.title}`);
+      }
+      continue;
+    }
+
+    // Event is found
+    if (normalizeColor(ev.getColor()) === UNWATCHED_COLOR_ID) {
+      // Event is unwatched → keep task (do nothing)
+      continue;
+    } else {
+      // Event is watched/default → delete task
       if (deleteTask(taskList.id, task)) deleted++;
     }
   }
 
-  // === Phase 3: Completed tasks reset event color ===
+  // === Phase 3: Completed tasks with matching unwatched events ===
   for (const task of tasks) {
     if (task.status !== 'completed') continue;
     const ev = eventByKey.get(task.title);
+
     if (ev && normalizeColor(ev.getColor()) === UNWATCHED_COLOR_ID) {
       try {
         ev.setColor(DEFAULT_COLOR_ID);
         reset++;
         Logger.log(`*** RESET COLOR: ${ev.getTitle()}`);
 
-        // delete the completed task after resetting color
-        if (deleteTask(taskList.id, task)) deleted++;
+        // Delete the completed task after resetting color
+        if (deleteTask(taskList.id, task)) {
+          Logger.log(`<<< CLEANED UP completed task: ${task.title}`);
+        }
       } catch (e) {
         Logger.log(`Error resetting color: ${e.message}`);
       }
