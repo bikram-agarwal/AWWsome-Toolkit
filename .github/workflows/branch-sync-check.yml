@@ -1,0 +1,32 @@
+name: Branch Sync Check
+on:
+  pull_request:
+jobs:
+  check-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history
+          
+      - name: Fetch base branch
+        run: |
+          git fetch origin ${{ github.base_ref }}
+          
+      - name: Check if branch is up to date
+        run: |
+          # Get the merge base
+          MERGE_BASE=$(git merge-base HEAD origin/${{ github.base_ref }})
+          BASE_HEAD=$(git rev-parse origin/${{ github.base_ref }})
+          
+          echo "Merge base: $MERGE_BASE"
+          echo "Base branch HEAD: $BASE_HEAD"
+          
+          if [ "$MERGE_BASE" != "$BASE_HEAD" ]; then
+            echo "❌ Branch is out of sync with ${{ github.base_ref }}"
+            echo "Please update your branch before merging."
+            exit 1
+          else
+            echo "✅ Branch is up to date with ${{ github.base_ref }}"
+          fi
