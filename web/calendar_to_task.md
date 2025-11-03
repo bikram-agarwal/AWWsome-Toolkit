@@ -12,8 +12,8 @@ Instead of scrolling through multiple months of calendar views trying to spot un
 1. You mark some calendar events as `unwatched` by changing their color. (e.g., Peacock = unwatched). 
 2. When the script runs, it creates corresponding tasks in your dedicated task list.
 3. When you are done, the script handles cleanup in one of two ways:
-   a. You complete the task → the task is deleted, and the event color is reset to default/watched.
-   b. You reset the event color → the corresponding task is deleted.
+   1. You complete the task → the task is deleted, and the event color is reset to default/watched.
+   2. You reset the event color → the corresponding task is deleted.
 
 **Usage Example:**
 
