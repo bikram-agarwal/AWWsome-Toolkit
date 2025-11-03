@@ -36,15 +36,21 @@ Comprehensive system cleanup tool and documentation for reclaiming disk space sa
 ## 🌐 Web
 
 ### Calendar to Task Sync
-Google Apps Script for syncing specific calendar events to Google Tasks.
+Google Apps Script with a sleek web interface for syncing calendar events to Google Tasks.
 
 - **Script**: [`calendar_to_task.js`](web/calendar_to_task.js)
 - **Guide**: [`calendar_to_task.md`](web/calendar_to_task.md)
 - **What it does**: 
-  - Picks up unwatched events from the `Entertainment` calendar and puts them in `Backlog` task list. 
+  - Picks up unwatched events from the `Entertainment` calendar and creates tasks in the `Backlog` list
   - Automatically removes tasks from task list when corresponding events in calendar are marked watched
   - Conversely, marks events in calendar as watched when tasks in task list are marked completed
-- **Platform**: Google Apps Script
+- **Features**:
+  - 🌐 **Browser-based dashboard** with real-time visual reports
+  - 🎨 **5 theme options** (Ocean Blue, Forest Green, Sunset Orange, Purple Dream, Rose Pink)
+  - 🌓 **Light/Dark mode** with system preference support
+  - 📅 **Custom date ranges** for flexible sync period selection
+  - 📊 **Collapsible phase tables** with detailed status indicators
+- **Platform**: Google Apps Script (Web App)
 - **Use case**: Perfect for tracking watchlists, entertainment queues, or any calendar-based TODO workflow
 
 ## 🚀 Getting Started
