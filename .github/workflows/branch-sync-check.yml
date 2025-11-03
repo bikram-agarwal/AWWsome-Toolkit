@@ -16,7 +16,7 @@ jobs:
           
       - name: Check if branch is up to date
         run: |
-          # Get the merge base
+          # FindGet the merge base
           MERGE_BASE=$(git merge-base HEAD origin/${{ github.base_ref }})
           BASE_HEAD=$(git rev-parse origin/${{ github.base_ref }})
           
