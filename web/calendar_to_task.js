@@ -20,7 +20,7 @@ function syncCalendarAndTasks() {
   }
 
   const events = calendar.getEvents(aWhileAgo, today, { max: 2000, futureEvents: false });
-  logAction("============== 📆 FETCHING CALENDAR EVENTS ==============");
+  logAction("📆 FETCHING CALENDAR EVENTS", null, true);
   logAction(`Found ${events.length} events in range`);
   events.forEach(ev => {
     logAction(
@@ -36,7 +36,7 @@ function syncCalendarAndTasks() {
   }
 
   const tasks = listAllTasks(taskList.id);
-  logAction("============== 📋 FETCHING TASKS ==============");
+  logAction("📋 FETCHING TASKS", null, true);
   logAction(`Found ${tasks.length} tasks in list "${TASK_LIST_NAME}"`);
   tasks.forEach(t => {
     logAction(`Task: ${t.title} | Notes: ${t.notes || ''} | Status: ${t.status}`);
@@ -49,7 +49,7 @@ function syncCalendarAndTasks() {
   const actions = [];
 
   // === Phase 1: Create tasks for unwatched events ===
-  logAction("============== PHASE 1️⃣: CREATE TASKS ==============", actions);
+  logAction("PHASE 1️⃣: CREATE TASKS", actions, true);
   for (const ev of events) {
     if (normalizeColor(ev.getColor()) === UNWATCHED_COLOR_ID && !ev.isRecurringEvent()) {
       const key = buildTaskTitle(ev);
@@ -69,14 +69,14 @@ function syncCalendarAndTasks() {
   ifNoChange(phaseChanges, actions);
 
   // === Phase 2: Handle tasks whose events are missing or mismatched ===
-  logAction("============== PHASE 2️⃣: CLEANUP TASKS ==============", actions);
+  logAction("PHASE 2️⃣: CLEANUP TASKS & RESET EVENTS", actions, true);
   phaseChanges = 0;
   for (const task of tasks) {
     const ev = eventByKey.get(task.title);
     if (!ev) {
       // No corresponding event found
       if (task.status === 'completed') {
-        // Completed + no event → delete
+        // Task Completed + No Event → Delete Task
         phaseChanges++;
         if (deleteTask(taskList.id, task)) {
           deleted++;
@@ -85,7 +85,7 @@ function syncCalendarAndTasks() {
           logAction(`⚠️ Failed deleting completed orphan task: ${task.title}`, actions);
         }
       } else {
-        // Incomplete + no event → leave it alone
+        // Task Incomplete + No Event → No change, keep task
         logAction(`Kept orphaned incomplete task: ${task.title}`);
       }
       continue;
@@ -93,9 +93,27 @@ function syncCalendarAndTasks() {
 
     // Event is found
     if (normalizeColor(ev.getColor()) === UNWATCHED_COLOR_ID) {
-      // Event is unwatched → keep task (do nothing)
-      logAction(`Keeping task for unwatched event: ${task.title}`);
-      continue;
+      // Event is Unwatched
+      if (task.status === 'completed') {
+        // Task Completed + Event Unwatched → reset event color + delete task
+        phaseChanges++;
+        try {
+          ev.setColor(DEFAULT_COLOR_ID);
+          reset++;
+          logAction(`🔁 RESET COLOR for: ${ev.getTitle()}`, actions);
+
+          if (deleteTask(taskList.id, task)) {
+            logAction(`🗑️ DELETED completed task after reset: ${task.title}`, actions);
+          } else {
+            logAction(`⚠️ Failed deleting completed task after reset: ${task.title}`, actions);
+          }
+        } catch (e) {
+          logAction(`⚠️ Error resetting color for ${ev.getTitle()}: ${e.message}`, actions);
+        }
+      } else {
+        // Task Incomplete + Event Unwatched → No change, keep task
+        logAction(`Keeping task for unwatched event: ${task.title}`);
+      }
     } else {
       // Event is watched/default → delete task
       phaseChanges++;
@@ -110,35 +128,8 @@ function syncCalendarAndTasks() {
 
   ifNoChange(phaseChanges, actions);
 
-  // === Phase 3: Completed tasks with matching unwatched events ===
-  logAction("============== PHASE 3️⃣: CLEANUP TASKS & RESET EVENTS ==============", actions);
-  phaseChanges = 0;
-  for (const task of tasks) {
-    if (task.status !== 'completed') continue;
-    const ev = eventByKey.get(task.title);
-
-    if (ev && normalizeColor(ev.getColor()) === UNWATCHED_COLOR_ID) {
-      phaseChanges++;
-      try {
-        ev.setColor(DEFAULT_COLOR_ID);
-        reset++;
-        logAction(`🔁 RESET COLOR for: ${ev.getTitle()}`, actions);
-
-        if (deleteTask(taskList.id, task)) {
-          logAction(`🗑️ DELETED completed task after reset: ${task.title}`, actions);
-        } else {
-          logAction(`⚠️ Failed deleting completed task after reset: ${task.title}`, actions);
-        }
-      } catch (e) {
-        logAction(`⚠️ Error resetting color for ${ev.getTitle()}: ${e.message}`, actions);
-      }
-    }
-  }
-
-  ifNoChange(phaseChanges, actions);
-
   // Summary
-  logAction("============== ✅ SYNC COMPLETE ==============", actions);
+  logAction("✅ SYNC COMPLETE", actions, true);
   const summary = `Created: ${created}, Deleted: ${deleted}, Reset: ${reset}`;
   logAction(`📊 Summary — ${summary}`, actions);
   return summary + "<br>" + actions.join("<br>");
@@ -174,9 +165,21 @@ function listAllTasks(taskListId) {
 }
 
 // Unified logging helper
-function logAction(msg, actions) {
-  Logger.log(msg);
-  if (actions) actions.push(msg);
+function logAction(msg, actions, isHeader = false) {
+  let logMsg = msg;
+  let htmlMsg = msg;
+
+  if (isHeader) {
+    const line = "====================";
+    logMsg = `${line} ${msg} ${line}`;
+    htmlMsg = `<div class="phase">${msg}</div>`;
+  }
+
+  Logger.log(logMsg);
+
+  if (actions) {
+    actions.push(isHeader ? htmlMsg : msg);
+  }
 }
 
 function ifNoChange(phaseChanges, actions) {
@@ -245,20 +248,38 @@ function doGet(e) {
     `<html>
       <head>
         <meta charset="utf-8">
-        <link rel="icon" href='data:image/svg+xml, <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">📆</text></svg>'>
+        <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">📆</text></svg>'>
         <title>📌 Media Sync</title>
         <style>
-          body{font-family:sans-serif;padding:2em}
-          #status{color:#444}
-          #result{margin-top:1em}
+          body { font-family: sans-serif; padding: 2em; max-width: 700px; margin: auto; }
+          #status { color: #444; font-weight: bold; }
+          #result { margin-top: 1em; opacity: 0; transition: opacity 0.3s ease; }
+          #result.visible { opacity: 1; }
+          #footer { margin-top: 1em; font-size: 0.9em; color: #666; }
+          button { margin-top: 1em; padding: 0.4em 0.8em; font-size: 1em; }
+          /* Phase header styling */
+          .phase {
+            margin-top: 1em;
+            padding: 0.6em 0.9em;
+            background: #e8f4ff;          /* pale blue background */
+            border-left: 4px solid #0078d4; /* Microsoft blue accent */
+            font-weight: 600;
+            font-family: sans-serif;
+            color: #222;
+            border-radius: 4px;
+          }
         </style>
         <script>
           function run() {
             document.getElementById('status').textContent = '⏳ Running…';
+            document.getElementById('result').classList.remove('visible');
+            document.getElementById('result').innerHTML = '';
+            document.getElementById('ranAt').textContent = '—';
             google.script.run
-              .withSuccessHandler(function(summary){
+              .withSuccessHandler(function(summary) {
                 document.getElementById('status').textContent = '✔ Done';
                 document.getElementById('result').innerHTML = summary;
+                document.getElementById('result').classList.add('visible');
                 document.getElementById('ranAt').textContent = new Date().toLocaleString();
               })
               .syncCalendarAndTasks();
@@ -269,7 +290,7 @@ function doGet(e) {
         <h2>📌 Calendar to Tasks Sync</h2>
         <div id="status">Initializing…</div>
         <div id="result"></div>
-        <p id="footer" style="margin-top:1em; font-size:0.9em; color:#666;">
+        <p id="footer">
           Ran at <span id="ranAt">—</span>
         </p>
         <button onclick="run()">🔄 Run Again</button>
