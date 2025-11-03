@@ -5,6 +5,7 @@ const CALENDAR_NAME = 'Entertainment';
 const TASK_LIST_NAME = 'Media Backlog 🎞️';
 const UNWATCHED_COLOR_ID = '7';   // "Unwatched" color
 const DEFAULT_COLOR_ID = '11';    // Calendar's default color
+const SCRIPT_TIME_ZONE = Session.getScriptTimeZone();
 // =================================================================
 
 function syncCalendarAndTasks() {
@@ -45,7 +46,7 @@ function syncCalendarAndTasks() {
   const eventByKey = new Map(events.map(ev => [buildTaskTitle(ev), ev]));
   const taskKeys = new Set(tasks.map(t => t.title));
 
-  let created = 0, deleted = 0, reset = 0, phaseChanges = 0;
+  let created = 0, deleted = 0, reset = 0, phaseChanges = 0, markedCompleted = 0;
   const actions = [];
 
   // === Phase 1: Create tasks for unwatched events ===
@@ -55,7 +56,7 @@ function syncCalendarAndTasks() {
       const key = buildTaskTitle(ev);
       if (!taskKeys.has(key)) {
         phaseChanges++;
-        if (insertTask(taskList.id, ev, key)) {
+        if (insertTask(taskList.id, key, ev.getLocation())) {
           created++;
           logAction(`🆕 CREATED task for: ${key}`, actions);
           taskKeys.add(key);
@@ -68,65 +69,76 @@ function syncCalendarAndTasks() {
 
   ifNoChange(phaseChanges, actions);
 
-  // === Phase 2: Handle tasks whose events are missing or mismatched ===
+// === Phase 2: Cleanup Tasks & Reset Events ===
   logAction("PHASE 2️⃣: CLEANUP TASKS & RESET EVENTS", actions, true);
   phaseChanges = 0;
   for (const task of tasks) {
     const ev = eventByKey.get(task.title);
-    if (!ev) {
-      // No corresponding event found
-      if (task.status === 'completed') {
-        // Task Completed + No Event → Delete Task
-        phaseChanges++;
-        if (deleteTask(taskList.id, task)) {
-          deleted++;
-          logAction(`🗑️ DELETED completed orphan task: ${task.title}`, actions);
-        } else {
-          logAction(`⚠️ Failed deleting completed orphan task: ${task.title}`, actions);
-        }
-      } else {
-        // Task Incomplete + No Event → No change, keep task
-        logAction(`Kept orphaned incomplete task: ${task.title}`);
-      }
-      continue;
-    }
 
-    // Event is found
-    if (normalizeColor(ev.getColor()) === UNWATCHED_COLOR_ID) {
-      // Event is Unwatched
-      if (task.status === 'completed') {
-        // Task Completed + Event Unwatched → reset event color + delete task
-        phaseChanges++;
+    // --- Case 1: Completed Tasks ---
+    if (task.status === 'completed') {
+      phaseChanges++;
+      if (!ev) {
+        // Task Completed + No Event (Manual / Orphan Task) -> Let Bulk Clear handle deletion
+        deleted++;
+        logAction(`🗑️ DELETE completed orphan task: ${task.title}`, actions);
+      } else if (normalizeColor(ev.getColor()) === UNWATCHED_COLOR_ID) {
+        // Task Completed + Event Unwatched -> Reset Event Color
         try {
           ev.setColor(DEFAULT_COLOR_ID);
           reset++;
           logAction(`🔁 RESET COLOR for: ${ev.getTitle()}`, actions);
-
-          if (deleteTask(taskList.id, task)) {
-            logAction(`🗑️ DELETED completed task after reset: ${task.title}`, actions);
-          } else {
-            logAction(`⚠️ Failed deleting completed task after reset: ${task.title}`, actions);
-          }
+          // Task is already marked completed, let Bulk Clear handle deletion.
+          logAction(`🗑️ DELETE completed task after event reset: ${task.title}`, actions);
         } catch (e) {
           logAction(`⚠️ Error resetting color for ${ev.getTitle()}: ${e.message}`, actions);
         }
-      } else {
-        // Task Incomplete + Event Unwatched → No change, keep task
-        logAction(`Keeping task for unwatched event: ${task.title}`);
       }
-    } else {
-      // Event is watched/default → delete task
-      phaseChanges++;
-      if (deleteTask(taskList.id, task)) {
-        deleted++;
-        logAction(`🗑️ DELETED (event watched): ${task.title}`, actions);
-      } else {
-        logAction(`⚠️ Failed deleting task (event watched): ${task.title}`, actions);
-      }
+      // For all completed tasks, we simply move on. They will be removed by the final clear() call.
+      continue; 
+    }
+
+    // --- Case 2: Incomplete Task Handling (status === 'needsAction') ---
+    
+    if (!ev) {
+      // Incomplete Task + No Event (Manual / Orphan Task) -> NO CHANGE, KEEP TASK
+      logAction(`Keeping orphaned incomplete task: ${task.title}`);
+      continue;
+    }
+
+    if (normalizeColor(ev.getColor()) === UNWATCHED_COLOR_ID) {
+      // Incomplete Task + Event Unwatched -> NO CHANGE, KEEP TASK (The list item we're still tracking)
+      logAction(`Keeping unwatched event's task: ${task.title}`);
+      continue;
+    }
+
+    // Incomplete Task + Event Watched/Default -> Mark as Completed for Bulk Clear
+    phaseChanges++;
+    try {
+      const updatedTask = { id: task.id, status: 'completed' };
+      Tasks.Tasks.update(updatedTask, taskListId);
+      markedCompleted++; deleted++;
+      logAction(`🗑️ DELETE (event watched): ${task.title}`, actions);
+    } catch (e) {
+      logAction(`⚠️ Failed marking task (event watched) as completed: ${task.title}`, actions);
+    }
+  }
+  
+  // Clear all completed tasks in bulk
+  const completedBeforeRun = tasks.filter(t => t.status === 'completed').length;
+  deleted = completedBeforeRun + markedCompleted;
+
+  if (deleted > 0) {
+    try {
+      // This API call clears all tasks with status='completed' in the list.
+      Tasks.Tasks.clear(taskListId);
+      logAction(`🧹 BULK CLEARED all completed tasks (Approx. ${deleted} total deletions)`, actions);
+    } catch (e) {
+      logAction(`⚠️ FAILED to bulk clear completed tasks!`, actions);
     }
   }
 
-  ifNoChange(phaseChanges, actions);
+  ifNoChange(phaseChanges + markedCompleted, actions);
 
   // Summary
   logAction("✅ SYNC COMPLETE", actions, true);
@@ -140,7 +152,8 @@ function syncCalendarAndTasks() {
 // -----------------------------------------------------------------
 
 function getCalendarByName(name) {
-  return CalendarApp.getAllCalendars().find(cal => cal.getName() === name);
+  const calendars = CalendarApp.getCalendarsByName(name);
+  return calendars.length > 0 ? calendars[0] : null; 
 }
 
 function getTaskListByName(name) {
@@ -155,8 +168,9 @@ function listAllTasks(taskListId) {
     const resp = Tasks.Tasks.list(taskListId, {
       showCompleted: true,
       showHidden: true,
-      maxResults: 100,   // can request up to 100 per page
-      pageToken: pageToken
+      maxResults: 100,
+      pageToken: pageToken,
+      fields: 'items(title,id,notes,status),nextPageToken' 
     });
     if (resp.items) all = all.concat(resp.items);
     pageToken = resp.nextPageToken;
@@ -190,13 +204,13 @@ function ifNoChange(phaseChanges, actions) {
 
 function buildTaskTitle(ev) {
   const tz = Session.getScriptTimeZone();
-  const eventDate = Utilities.formatDate(ev.getStartTime(), tz, 'MM/dd/yyyy');
+  const eventDate = Utilities.formatDate(ev.getStartTime(), SCRIPT_TIME_ZONE, 'MM/dd/yyyy');
   return `${ev.getTitle()} (${eventDate})`;
 }
 
-function insertTask(taskListId, ev, taskTitle) {
-  const icon = platformIcon(ev.getLocation());
-  const notes = `On: ${icon} ${ev.getLocation() || 'N/A'}`;
+function insertTask(taskListId, taskTitle, location) {
+  const icon = platformIcon(location);
+  const notes = `On: ${icon} ${location || 'N/A'}`;
   const task = { title: taskTitle, notes, status: 'needsAction' };
   try {
     Tasks.Tasks.insert(task, taskListId);
@@ -226,16 +240,25 @@ function normalizeColor(color) {
 function platformIcon(location) {
   if (!location) return '';
   const lc = location.toLowerCase();
-  if (lc.includes('netflix')) return '🍿';
-  if (lc.includes('prime') || lc.includes('amazon')) return '📦';
-  if (lc.includes('disney')) return '🪄';
-  if (lc.includes('hulu')) return '💚';
-  if (lc.includes('hbo') || lc.includes('max')) return '🎥';
-  if (lc.includes('apple')) return '🍎'; 
-  if (lc.includes('peacock')) return '🦚';
-  if (lc.includes('paramount')) return '🌄';
-  if (lc.includes('starz')) return '⭐';
-  if (lc.includes('game pass') || lc.includes('xbox')) return '🎮';
+  const platformMap = new Map([
+    [['netflix'], '🍿'],
+    [['prime', 'amazon'], '📦'],
+    [['disney'], '🪄'],
+    [['hulu'], '💚'],
+    [['hbo', 'max'], '🎥'],
+    [['apple'], '🍎'],
+    [['peacock'], '🦚'],
+    [['paramount'], '🌄'],
+    [['starz'], '⭐'],
+    [['youtube'], '▶️'],
+    [['game pass', 'xbox'], '🎮']
+  ]);
+
+  for (const [keywords, icon] of platformMap.entries()) {
+    if (keywords.some(keyword => lc.includes(keyword))) {
+      return icon;
+    }
+  }
   return '';
 }
 
