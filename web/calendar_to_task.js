@@ -10,9 +10,18 @@ const SCRIPT_TIME_ZONE = Session.getScriptTimeZone();
 
 function syncCalendarAndTasks(startDate, endDate) {
   // Helper to parse date string in local timezone (avoid UTC conversion)
-  const parseDate = (dateStr) => {
-    const parts = dateStr.split('-');
-    return new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+  const parseDate = (dateInput) => {
+    // If already a Date object, return it
+    if (dateInput instanceof Date) {
+      return dateInput;
+    }
+    // If string, parse it
+    if (typeof dateInput === 'string') {
+      const parts = dateInput.split('-');
+      return new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+    }
+    // Fallback: try to create Date from whatever was passed
+    return new Date(dateInput);
   };
   
   // Use provided dates or default to last 6 months

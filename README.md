@@ -20,6 +20,21 @@ Documentation for extrating AI models from the Pixel 10 factory image.
 
 ## 🪟 Windows
 
+### Start Menu Manager
+Automated Start Menu backup / restore, with scheduling.
+- **Script**: [`start_menu_manager.ps1`](windows/start_menu_manager.ps1)
+- **Guide**: [`start_menu_manager.md`](windows/start_menu_manager.md)
+- **What it does**:
+  - 💾 **SAVE mode**: Scans Start Menu folder and generates configuration file
+  - 🛡️ **ENFORCE mode**: Organizes shortcuts based on configuration
+- **Features**:
+  - Scheduled task support for daily automation
+  - Quarantines unknown shortcuts to "Unsorted" folder
+  - Handles different app versions (e.g., Chrome 120, Chrome 121) and architecture variants (32-bit/64-bit) intelligently
+  - Dry-run preview before making changes
+  - Comprehensive logging with timestamps
+- **Use case**: Keep Start Menu organized automatically, especially useful after software updates or new installations
+
 ### Windows Cleanup
 Comprehensive system cleanup tool and documentation for reclaiming disk space safely.
 
