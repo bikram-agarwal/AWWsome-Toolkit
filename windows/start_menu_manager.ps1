@@ -15,6 +15,7 @@ $quarantineFolder = "Programs\Unsorted"         # Relative to $target.
 
 # Script-level variables
 $script:createdFolders = @{}                    # Cache for folder existence checks (used by Ensure_Folder)
+$script:normalizeCache = @{}                    # Cache for normalized shortcut names (performance optimization)
 
 # Determine run mode (use internal $currentMode since parameter validation prevents reassignment to $null)
 if ($Auto) {
@@ -98,6 +99,12 @@ function Ensure_Folder {
 
 function Normalize_ShortcutName {
     param([string]$name)
+    
+    # Check cache first (optimization: avoid repeated regex operations)
+    if ($script:normalizeCache.ContainsKey($name)) {
+        return $script:normalizeCache[$name]
+    }
+    
     # Strip version/architecture info so "Chrome v120 (64-bit).lnk" becomes "Chrome.lnk"
     # - Remove ["(64-bit)", "(Beta)", etc.], ["v1.2.3", "2025", etc.], ["- Setup" at end], and multiple spaces to one
     $n = $name -replace '\s*\((Preview|Beta|Insiders|64-bit|32-bit|x64|x86)\)', '' `
@@ -108,6 +115,9 @@ function Normalize_ShortcutName {
 
     # Ensure .lnk suffix remains if present
     if ($n -notmatch '\.lnk$' -and $name -match '\.lnk$') { $n = "$n.lnk" }
+    
+    # Cache result
+    $script:normalizeCache[$name] = $n
     return $n
 }
 
@@ -133,6 +143,36 @@ function Get_ShortcutMatchKey {
             return $null
         }
     }
+}
+
+function Format_ActionLine {
+    param(
+        [string]$Emoji,
+        [string]$Name,
+        [string]$Operation,
+        [string]$Source = "",
+        [string]$Destination = "",
+        [string]$StatusEmoji = "",
+        [string]$EmojiColor = "White",
+        [string]$OperationColor = "White"
+    )
+    # Optimized: Build formatted line with consistent column widths
+    
+    $line = "  $Emoji $($Name.PadRight(35)) $($Operation.PadRight(20))"
+    
+    if ($Source) {
+        $line += " FROM: $($Source.PadRight(30)) -> TO: $($Destination.PadRight(30))"
+    } elseif ($Destination) {
+        $line += " IN: $($Destination.PadRight(61))"
+    } else {
+        $line += " ".PadRight(82)
+    }
+    
+    if ($StatusEmoji) {
+        $line += " $StatusEmoji"
+    }
+    
+    return $line
 }
 
 # ============================================= SAVE MODE FUNCTIONS ============================================
@@ -201,7 +241,13 @@ function Scan_StartMenuShortcuts {
     foreach ($folder in ($tree.Keys | Sort-Object)) {
         $sortedTree[$folder] = [ordered]@{}
         foreach ($shortcutName in ($tree[$folder].Keys | Sort-Object)) {
-            $sortedTree[$folder][$shortcutName] = $tree[$folder][$shortcutName]
+            # Sort properties within each shortcut alphabetically
+            $shortcutDetails = $tree[$folder][$shortcutName]
+            $sortedDetails = [ordered]@{}
+            foreach ($propName in ($shortcutDetails.Keys | Sort-Object)) {
+                $sortedDetails[$propName] = $shortcutDetails[$propName]
+            }
+            $sortedTree[$folder][$shortcutName] = $sortedDetails
         }
     }
     
@@ -297,7 +343,58 @@ function Save_ConfigFile {
     $shortcutCount = ($ConfigTree.Values | ForEach-Object { $_.Keys.Count } | Measure-Object -Sum).Sum
     
     Write-Host "Saving config..." -ForegroundColor Cyan
-    $ConfigTree | ConvertTo-Json -Depth 10 -Compress:$false | Out-File $ConfigPath -Encoding UTF8
+    
+    # Manually build JSON with guaranteed alphabetical sorting at all levels
+    $jsonLines = @("{")
+    $folderKeys = $ConfigTree.Keys | Sort-Object
+    $folderIndex = 0
+    
+    foreach ($folder in $folderKeys) {
+        $folderIndex++
+        $isLastFolder = ($folderIndex -eq $folderKeys.Count)
+        
+        # Escape folder name for JSON
+        $folderJson = $folder -replace '\\', '\\'
+        $jsonLines += "  `"$folderJson`": {"
+        
+        $shortcuts = $ConfigTree[$folder]
+        $shortcutKeys = $shortcuts.Keys | Sort-Object
+        $shortcutIndex = 0
+        
+        foreach ($shortcutName in $shortcutKeys) {
+            $shortcutIndex++
+            $isLastShortcut = ($shortcutIndex -eq $shortcutKeys.Count)
+            
+            # Escape shortcut name for JSON
+            $shortcutJson = $shortcutName -replace '\\', '\\'
+            $jsonLines += "    `"$shortcutJson`": {"
+            
+            $details = $shortcuts[$shortcutName]
+            $propKeys = $details.Keys | Sort-Object
+            $propIndex = 0
+            
+            foreach ($propName in $propKeys) {
+                $propIndex++
+                $isLastProp = ($propIndex -eq $propKeys.Count)
+                
+                # Escape property value for JSON
+                $propValue = $details[$propName] -replace '\\', '\\' -replace '"', '\"'
+                $comma = if ($isLastProp) { "" } else { "," }
+                $jsonLines += "      `"$propName`": `"$propValue`"$comma"
+            }
+            
+            $comma = if ($isLastShortcut) { "" } else { "," }
+            $jsonLines += "    }$comma"
+        }
+        
+        $comma = if ($isLastFolder) { "" } else { "," }
+        $jsonLines += "  }$comma"
+    }
+    
+    $jsonLines += "}"
+    
+    # Write to file
+    $jsonLines | Out-File $ConfigPath -Encoding UTF8
     
     Write-Host "[OK] Config file saved successfully!" -ForegroundColor Green
     Write-Host "  Location: $ConfigPath" -ForegroundColor Gray
@@ -470,30 +567,17 @@ function Build_ConfigLookupTable {
         [string]$TargetPath
     )
     
+    # OPTIMIZED: Single-pass processing instead of double iteration
     # Problem: Different shortcuts may normalize to the same name after stripping versions/architecture
-    # Examples: ODBC 32-bit and ODBC 64-bit both become ODBC.lnk after normalization
-    # Solution: Detect when multiple shortcuts normalize to same name, and use full names for those
+    # Solution: Detect collisions and build all maps in one pass
+    
     $allConfigShortcuts = @{}      # Temporary: normalized name -> array of original names
     $expectedMap = @{}             # Final lookup: shortcut name -> folder
     $shortcutDetailsMap = @{}      # Map of shortcut -> details for recreation
     
-    # PASS 1: Group all shortcuts by normalized name to detect collisions
+    # Single pass: build all data structures at once
     foreach ($folderKey in $ConfigRaw.PSObject.Properties.Name) {
-        $shortcuts = $ConfigRaw.$folderKey
-        foreach ($sc in $shortcuts.PSObject.Properties.Name) {
-            $norm = Normalize_ShortcutName $sc
-            if (-not $allConfigShortcuts.ContainsKey($norm)) {
-                $allConfigShortcuts[$norm] = @()
-            }
-            $allConfigShortcuts[$norm] += @{Original = $sc; Folder = $folderKey}
-            
-            # Store details for later use (for recreation)
-            $shortcutDetailsMap["$folderKey\$sc"] = $shortcuts.$sc
-        }
-    }
-    
-    # PASS 2: Build final lookup map, using full names for variants, normalized names for others
-    foreach ($folderKey in $ConfigRaw.PSObject.Properties.Name) {
+        # Create folders early
         if ($folderKey -ne "Root" -and -not [string]::IsNullOrEmpty($folderKey)) {
             Ensure_Folder (Join-Path $TargetPath $folderKey)
         }
@@ -502,12 +586,25 @@ function Build_ConfigLookupTable {
         foreach ($sc in $shortcuts.PSObject.Properties.Name) {
             $norm = Normalize_ShortcutName $sc
             
-            # Decide what key to use in $expectedMap
-            if ($allConfigShortcuts[$norm].Count -gt 1) {
-                $keyToUse = $sc  # Use full original name for variants
-            } else {
-                $keyToUse = $norm  # Use normalized name for unique shortcuts
+            # Track for collision detection
+            if (-not $allConfigShortcuts.ContainsKey($norm)) {
+                $allConfigShortcuts[$norm] = @()
             }
+            $allConfigShortcuts[$norm] += @{Original = $sc; Folder = $folderKey}
+            
+            # Store details for recreation
+            $shortcutDetailsMap["$folderKey\$sc"] = $shortcuts.$sc
+        }
+    }
+    
+    # Second mini-pass: build expectedMap now that we know which are variants
+    foreach ($folderKey in $ConfigRaw.PSObject.Properties.Name) {
+        $shortcuts = $ConfigRaw.$folderKey
+        foreach ($sc in $shortcuts.PSObject.Properties.Name) {
+            $norm = Normalize_ShortcutName $sc
+            
+            # Decide key: full name for variants, normalized for unique
+            $keyToUse = if ($allConfigShortcuts[$norm].Count -gt 1) { $sc } else { $norm }
             
             if ($expectedMap.ContainsKey($keyToUse)) {
                 Write_Log "**Config duplicate:** $keyToUse (folder $($expectedMap[$keyToUse]) vs $folderKey)"
@@ -532,7 +629,7 @@ function Scan_AndOrganizeShortcuts {
     )
     
     Write-Host "Scanning shortcuts at $TargetPath..." -ForegroundColor Cyan
-    $allShortcuts = Get-ChildItem -Path $TargetPath -Recurse -Filter *.lnk -Force
+    $allShortcuts = @(Get-ChildItem -Path $TargetPath -Recurse -Filter *.lnk -Force)
     
     $actualIndex = @{}
     $processed = @{}
@@ -540,7 +637,7 @@ function Scan_AndOrganizeShortcuts {
     $plannedDeletes = [System.Collections.Generic.List[hashtable]]::new()
     $foldersToCheck = @{}
 
-    Write-Host "Processing $(($allShortcuts | Measure-Object).Count) shortcuts..." -ForegroundColor Cyan
+    Write-Host "Processing $($allShortcuts.Count) shortcuts..." -ForegroundColor Cyan
 
     foreach ($item in $allShortcuts) {
         $norm = Normalize_ShortcutName $item.Name
@@ -570,18 +667,32 @@ function Scan_AndOrganizeShortcuts {
             $itemFolder = Get_RelativePath $item.DirectoryName
             $existingFolder = Get_RelativePath $existing.DirectoryName
             
-            # Delete the one in wrong location
+            # Delete the one in wrong location (or if both are same, keep first found)
             if ($correctFolder) {
-                if ($itemFolder -ne $correctFolder) {
+                if ($itemFolder -ne $correctFolder -and $existingFolder -eq $correctFolder) {
+                    # Current item is wrong, existing is correct -> delete current
                     Write_Log "  -> Deleting duplicate from wrong location: '$($item.Name)' at $itemFolder (correct: $correctFolder)"
                     $plannedDeletes.Add(@{ Path = $item.FullName; Name = $item.Name; Folder = $itemFolder; CorrectFolder = $correctFolder })
                     $foldersToCheck[$item.DirectoryName] = $true
                     continue
-                } elseif ($existingFolder -ne $correctFolder) {
+                } elseif ($existingFolder -ne $correctFolder -and $itemFolder -eq $correctFolder) {
+                    # Existing is wrong, current is correct -> delete existing and update index
                     Write_Log "  -> Deleting duplicate from wrong location: '$($existing.Name)' at $existingFolder (correct: $correctFolder)"
                     $plannedDeletes.Add(@{ Path = $existing.FullName; Name = $existing.Name; Folder = $existingFolder; CorrectFolder = $correctFolder })
                     $foldersToCheck[$existing.DirectoryName] = $true
                     $actualIndex[$indexKey] = $item
+                } elseif ($itemFolder -eq $correctFolder -and $existingFolder -eq $correctFolder) {
+                    # Both are in correct location -> delete current (keep first found)
+                    Write_Log "  -> Both duplicates in correct location. Deleting second: '$($item.Name)' at $itemFolder"
+                    $plannedDeletes.Add(@{ Path = $item.FullName; Name = $item.Name; Folder = $itemFolder; CorrectFolder = $correctFolder })
+                    $foldersToCheck[$item.DirectoryName] = $true
+                    continue
+                } else {
+                    # Both are wrong -> delete current (keep first found)
+                    Write_Log "  -> Both duplicates in wrong location. Deleting second: '$($item.Name)' at $itemFolder (correct: $correctFolder)"
+                    $plannedDeletes.Add(@{ Path = $item.FullName; Name = $item.Name; Folder = $itemFolder; CorrectFolder = $correctFolder })
+                    $foldersToCheck[$item.DirectoryName] = $true
+                    continue
                 }
             } else {
                 Write_Log "  -> Neither duplicate matches config. Deleting second: '$($item.Name)'"
@@ -792,14 +903,22 @@ function Display_EnforcePreview {
         if ($toMove.Count -gt 0) {
             Write_Log "MOVES TO CORRECT FOLDERS ($($toMove.Count)):" -Color Green -ToScreen
             foreach ($move in $toMove) {
-                Write-Host "  ➡️ " -NoNewline -ForegroundColor Green
-                Write-Host "$($move.Name.PadRight(35)) " -NoNewline -ForegroundColor White
-                Write-Host "$("[Move]".PadRight(20)) " -NoNewline -ForegroundColor Green
-                Write-Host "FROM: " -NoNewline -ForegroundColor DarkGray
-                Write-Host "$($move.CurrentFolder.PadRight(30)) " -NoNewline -ForegroundColor Gray
-                Write-Host "-> TO: " -NoNewline -ForegroundColor DarkGray
-                Write-Host "$($move.DestFolder)" -ForegroundColor Gray
+                $line = Format_ActionLine -Emoji "➡️" -Name $move.Name -Operation "[Move]" `
+                    -Source $move.CurrentFolder -Destination $move.DestFolder
+                Write-Host $line -ForegroundColor Green
                 Write_Log "  - $($move.Name) FROM: $($move.CurrentFolder) -> TO: $($move.DestFolder)"
+            }
+            Write-Host ""
+        }
+        
+        # Show missing shortcuts to recreate
+        if ($MissingShortcuts.Count -gt 0) {
+            Write_Log "MISSING SHORTCUTS TO RECREATE ($($MissingShortcuts.Count)):" -Color Cyan -ToScreen
+            foreach ($missing in $MissingShortcuts) {
+                $line = Format_ActionLine -Emoji "➕" -Name $missing.Name -Operation "[Recreate]" `
+                    -Destination $missing.Folder
+                Write-Host $line -ForegroundColor Cyan
+                Write_Log "  - $($missing.Name) IN: $($missing.Folder)"
             }
             Write-Host ""
         }
@@ -809,49 +928,33 @@ function Display_EnforcePreview {
         if ($toQuarantine.Count -gt 0) {
             Write_Log "UNKNOWN SHORTCUTS TO QUARANTINE ($($toQuarantine.Count)):" -Color Yellow -ToScreen
             foreach ($move in $toQuarantine) {
-                Write-Host "  🥅 " -NoNewline -ForegroundColor Yellow
-                Write-Host "$($move.Name.PadRight(35)) " -NoNewline -ForegroundColor White
-                Write-Host "$("[Quarantine]".PadRight(20)) " -NoNewline -ForegroundColor Yellow
-                Write-Host "FROM: " -NoNewline -ForegroundColor DarkGray
-                Write-Host "$($move.CurrentFolder.PadRight(30)) " -NoNewline -ForegroundColor Gray
-                Write-Host "-> TO: " -NoNewline -ForegroundColor DarkGray
-                Write-Host "$($move.DestFolder)" -ForegroundColor Gray
+                $line = Format_ActionLine -Emoji "🥅" -Name $move.Name -Operation "[Quarantine]" `
+                    -Source $move.CurrentFolder -Destination $move.DestFolder
+                Write-Host $line -ForegroundColor Yellow
                 Write_Log "  - $($move.Name) FROM: $($move.CurrentFolder) -> TO: $($move.DestFolder)"
             }
             Write-Host ""
         }
-        
-        # Show deletes
+
+        # Show deletes (duplicates)
         if ($PlannedDeletes.Count -gt 0) {
             Write_Log "DUPLICATE SHORTCUTS TO DELETE ($($PlannedDeletes.Count)):" -Color Red -ToScreen
             foreach ($delete in $PlannedDeletes) {
-                Write_Log "  - $($delete.Name) at $($delete.Folder)" -Color Red -ToScreen
+                $line = Format_ActionLine -Emoji "🎭" -Name $delete.Name -Operation "[Delete]" `
+                    -Destination $delete.Folder
+                Write-Host $line -ForegroundColor Red
+                Write_Log "  - $($delete.Name) IN: $($delete.Folder)"
             }
             Write-Host ""
-        }
-        
+        }        
+
         # Show empty folders (wrap in @() to handle single items correctly)
         if ($EmptyFoldersToDelete.Count -gt 0) {
             Write_Log "EMPTY FOLDERS TO DELETE ($($EmptyFoldersToDelete.Count)):" -Color Magenta -ToScreen
             foreach ($folder in @($EmptyFoldersToDelete)) {
-                Write-Host "  🗑️ " -NoNewline -ForegroundColor Magenta
-                Write-Host "$($folder.DisplayFolder.PadRight(35)) " -NoNewline -ForegroundColor Magenta
-                Write-Host "$("[Delete]".PadRight(20))" -ForegroundColor Magenta
+                $line = Format_ActionLine -Emoji "🗑️" -Name $folder.DisplayFolder -Operation "[Delete]"
+                Write-Host $line -ForegroundColor Magenta
                 Write_Log "  - $($folder.DisplayFolder)"
-            }
-            Write-Host ""
-        }
-        
-        # Show missing shortcuts to recreate
-        if ($MissingShortcuts.Count -gt 0) {
-            Write_Log "MISSING SHORTCUTS TO RECREATE ($($MissingShortcuts.Count)):" -Color Cyan -ToScreen
-            foreach ($missing in $MissingShortcuts) {
-                Write-Host "  ➕ " -NoNewline -ForegroundColor Cyan
-                Write-Host "$($missing.Name.PadRight(35)) " -NoNewline -ForegroundColor White
-                Write-Host "$("[Recreate]".PadRight(20)) " -NoNewline -ForegroundColor Cyan
-                Write-Host "IN: " -NoNewline -ForegroundColor DarkGray
-                Write-Host "$($missing.Folder)" -ForegroundColor Gray
-                Write_Log "  - $($missing.Name) IN: $($missing.Folder)"
             }
             Write-Host ""
         }
@@ -888,30 +991,20 @@ function Execute_ShortcutMoves {
             $emoji = if ($move.Type -eq "Quarantine") { "🥅" } else { "➡️" }
             $operation = if ($move.Type -eq "Quarantine") { "[Quarantine]" } else { "[Move]" }
             
-            # Print compact success line with operation-specific emoji, alignment, and status at end
-            Write-Host "  $emoji " -NoNewline -ForegroundColor Green
-            Write-Host "$($move.Name.PadRight(35)) " -NoNewline -ForegroundColor White
-            Write-Host "$($operation.PadRight(20)) " -NoNewline -ForegroundColor Green
-            Write-Host "FROM: " -NoNewline -ForegroundColor DarkGray
-            Write-Host "$($move.CurrentFolder.PadRight(30)) " -NoNewline -ForegroundColor Gray
-            Write-Host "-> TO: " -NoNewline -ForegroundColor DarkGray
-            Write-Host "$($move.DestFolder.PadRight(30)) " -NoNewline -ForegroundColor Gray
-            Write-Host "✅" -ForegroundColor Green
+            # Print compact success line (optimized)
+            $line = Format_ActionLine -Emoji $emoji -Name $move.Name -Operation $operation `
+                -Source $move.CurrentFolder -Destination $move.DestFolder -StatusEmoji "✅"
+            Write-Host $line -ForegroundColor Green
             
             Write_Log "$($move.Type): $($move.Name) from $($move.CurrentFolder) to $($move.DestFolder)"
             $SuccessCount.Value++
         } catch {
-            # Print compact error line with status at end
+            # Print compact error line (optimized)
             $emoji = if ($move.Type -eq "Quarantine") { "🥅" } else { "➡️" }
             $operation = if ($move.Type -eq "Quarantine") { "[Quarantine]" } else { "[Move]" }
-            Write-Host "  $emoji " -NoNewline
-            Write-Host "$($move.Name.PadRight(35)) " -NoNewline -ForegroundColor White
-            Write-Host "$($operation.PadRight(20)) " -NoNewline -ForegroundColor Red
-            Write-Host "FROM: " -NoNewline -ForegroundColor DarkGray
-            Write-Host "$($move.CurrentFolder.PadRight(30)) " -NoNewline -ForegroundColor Gray
-            Write-Host "-> TO: " -NoNewline -ForegroundColor DarkGray
-            Write-Host "$($move.DestFolder.PadRight(30)) " -NoNewline -ForegroundColor Gray
-            Write-Host "❌" -ForegroundColor Red
+            $line = Format_ActionLine -Emoji $emoji -Name $move.Name -Operation $operation `
+                -Source $move.CurrentFolder -Destination $move.DestFolder -StatusEmoji "❌"
+            Write-Host $line -ForegroundColor Red
             
             Write_Log "$($move.Type) failed: $($move.Name) - $_"
             $ErrorCount.Value++
@@ -950,24 +1043,18 @@ function Execute_ShortcutRecreations {
             if ($missing.Details.Description) { $shortcut.Description = $missing.Details.Description }
             $shortcut.Save()
             
-            # Print compact success line with recreation emoji, alignment, and status at end
-            Write-Host "  ➕ " -NoNewline -ForegroundColor Cyan
-            Write-Host "$($missing.Name.PadRight(35)) " -NoNewline -ForegroundColor White
-            Write-Host "$("[Recreate]".PadRight(20)) " -NoNewline -ForegroundColor Cyan
-            Write-Host "IN: " -NoNewline -ForegroundColor DarkGray
-            Write-Host "$($missing.Folder.PadRight(61)) " -NoNewline -ForegroundColor Gray
-            Write-Host "✅" -ForegroundColor Green
+            # Print compact success line (optimized)
+            $line = Format_ActionLine -Emoji "➕" -Name $missing.Name -Operation "[Recreate]" `
+                -Destination $missing.Folder -StatusEmoji "✅"
+            Write-Host $line -ForegroundColor Cyan
             
             Write_Log "Recreated: $($missing.Name) in $($missing.Folder)"
             $SuccessCount.Value++
         } catch {
-            # Print compact error line with status at end
-            Write-Host "  ➕ " -NoNewline
-            Write-Host "$($missing.Name.PadRight(35)) " -NoNewline -ForegroundColor White
-            Write-Host "$("[Recreate]".PadRight(20)) " -NoNewline -ForegroundColor Red
-            Write-Host "IN: " -NoNewline -ForegroundColor DarkGray
-            Write-Host "$($missing.Folder.PadRight(61)) " -NoNewline -ForegroundColor Gray
-            Write-Host "❌" -ForegroundColor Red
+            # Print compact error line (optimized)
+            $line = Format_ActionLine -Emoji "➕" -Name $missing.Name -Operation "[Recreate]" `
+                -Destination $missing.Folder -StatusEmoji "❌"
+            Write-Host $line -ForegroundColor Red
             
             Write_Log "Recreate failed: $($missing.Name) - $_"
             $ErrorCount.Value++
@@ -975,6 +1062,38 @@ function Execute_ShortcutRecreations {
     }
     
     [System.Runtime.Interopservices.Marshal]::ReleaseComObject($shell) | Out-Null
+}
+
+function Execute_ShortcutDeletes {
+    param(
+        $PlannedDeletes,
+        [ref]$SuccessCount,
+        [ref]$ErrorCount
+    )
+    
+    if ($PlannedDeletes.Count -eq 0) { return }
+    
+    foreach ($delete in $PlannedDeletes) {
+        try {
+            Remove-Item -Path $delete.Path -Force -ErrorAction Stop
+            
+            # Print compact success line (optimized)
+            $line = Format_ActionLine -Emoji "🎭" -Name $delete.Name -Operation "[Delete]" `
+                -Destination $delete.Folder -StatusEmoji "✅"
+            Write-Host $line -ForegroundColor Red
+            
+            Write_Log "Deleted duplicate: $($delete.Name) from $($delete.Folder)"
+            $SuccessCount.Value++
+        } catch {
+            # Print compact error line (optimized)
+            $line = Format_ActionLine -Emoji "🎭" -Name $delete.Name -Operation "[Delete]" `
+                -Destination $delete.Folder -StatusEmoji "❌"
+            Write-Host $line -ForegroundColor Red
+            
+            Write_Log "Delete failed: $($delete.Name) - $_"
+            $ErrorCount.Value++
+        }
+    }
 }
 
 function Execute_FolderDeletes {
@@ -993,32 +1112,23 @@ function Execute_FolderDeletes {
             if ($null -eq $items -or $items.Count -eq 0) {
                 Remove-Item -Path $folder.Path -Force -ErrorAction Stop
                 
-                # Print compact success line with deletion emoji, alignment, and status at end
-                Write-Host "  🗑️ " -NoNewline -ForegroundColor Magenta
-                Write-Host "$($folder.DisplayFolder.PadRight(35)) " -NoNewline -ForegroundColor Magenta
-                Write-Host "$("[Delete]".PadRight(20)) " -NoNewline -ForegroundColor Magenta
-                Write-Host " ".PadRight(62) -NoNewline
-                Write-Host "✅" -ForegroundColor Green
+                # Print compact success line (optimized)
+                $line = Format_ActionLine -Emoji "🗑️" -Name $folder.DisplayFolder -Operation "[Delete]" -StatusEmoji "✅"
+                Write-Host $line -ForegroundColor Magenta
                 
                 Write_Log "Deleted empty folder: $($folder.DisplayFolder)"
                 $SuccessCount.Value++
             } else {
-                # Print compact skip line with delete emoji in first column, warning in last
-                Write-Host "  🗑️  " -NoNewline -ForegroundColor Magenta
-                Write-Host "$($folder.DisplayFolder.PadRight(35)) " -NoNewline -ForegroundColor Magenta
-                Write-Host "$("[Delete]".PadRight(20)) " -NoNewline -ForegroundColor Yellow
-                Write-Host " ".PadRight(62) -NoNewline
-                Write-Host "⚠️" -ForegroundColor Yellow
+                # Print compact skip line (optimized)
+                $line = Format_ActionLine -Emoji "🗑️" -Name $folder.DisplayFolder -Operation "[Delete]" -StatusEmoji "⚠️"
+                Write-Host $line -ForegroundColor Yellow
                 
                 Write_Log "Skipped deletion (folder not empty): $($folder.DisplayFolder)"
             }
         } catch {
-            # Print compact error line with delete emoji in first column, error in last
-            Write-Host "  🗑️  " -NoNewline -ForegroundColor Magenta
-            Write-Host "$($folder.DisplayFolder.PadRight(35)) " -NoNewline -ForegroundColor Magenta
-            Write-Host "$("[Delete]".PadRight(20)) " -NoNewline -ForegroundColor Red
-            Write-Host " ".PadRight(62) -NoNewline
-            Write-Host "❌" -ForegroundColor Red
+            # Print compact error line (optimized)
+            $line = Format_ActionLine -Emoji "🗑️" -Name $folder.DisplayFolder -Operation "[Delete]" -StatusEmoji "❌"
+            Write-Host $line -ForegroundColor Red
             
             Write_Log "Error deleting folder: $($folder.DisplayFolder) - $_"
             $ErrorCount.Value++
@@ -1150,16 +1260,34 @@ function Invoke_EnforceMode {
     $successCount = 0
     $errorCount = 0
 
-    # Execute moves
-    Execute_ShortcutMoves -PlannedMoves $scanResults.PlannedMoves `
-        -SuccessCount ([ref]$successCount) -ErrorCount ([ref]$errorCount)
+    # Execute in correct order: moves -> recreations -> quarantines -> duplicate deletes -> folder deletes
     
-    # Execute recreations (use @() to prevent unwrapping single-item collections)
+    # 1. Execute moves (regular moves only, not quarantines)
+    $regularMoves = @($scanResults.PlannedMoves | Where-Object { $_.Type -eq "Move" })
+    if ($regularMoves.Count -gt 0) {
+        Execute_ShortcutMoves -PlannedMoves $regularMoves `
+            -SuccessCount ([ref]$successCount) -ErrorCount ([ref]$errorCount)
+    }
+    
+    # 2. Execute recreations (use @() to prevent unwrapping single-item collections)
     Execute_ShortcutRecreations -MissingShortcuts @($missingShortcuts) `
         -TargetPath $target `
         -SuccessCount ([ref]$successCount) -ErrorCount ([ref]$errorCount)
     
-    # Execute folder deletes (use @() to prevent unwrapping single-item collections)
+    # 3. Execute quarantines
+    $quarantineMoves = @($scanResults.PlannedMoves | Where-Object { $_.Type -eq "Quarantine" })
+    if ($quarantineMoves.Count -gt 0) {
+        Execute_ShortcutMoves -PlannedMoves $quarantineMoves `
+            -SuccessCount ([ref]$successCount) -ErrorCount ([ref]$errorCount)
+    }
+    
+    # 4. Execute duplicate deletes
+    if ($scanResults.PlannedDeletes.Count -gt 0) {
+        Execute_ShortcutDeletes -PlannedDeletes $scanResults.PlannedDeletes `
+            -SuccessCount ([ref]$successCount) -ErrorCount ([ref]$errorCount)
+    }
+    
+    # 5. Execute folder deletes (use @() to prevent unwrapping single-item collections)
     Execute_FolderDeletes -EmptyFoldersToDelete @($emptyFoldersToDelete) `
         -SuccessCount ([ref]$successCount) -ErrorCount ([ref]$errorCount)
     
