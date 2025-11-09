@@ -16,6 +16,7 @@ $quarantineFolder = "Programs\Unsorted"         # Relative to $target.
 # Script-level variables
 $script:createdFolders = @{}                    # Cache for folder existence checks (used by Ensure_Folder)
 $script:normalizeCache = @{}                    # Cache for normalized shortcut names (performance optimization)
+$script:consoleWidth = try { $Host.UI.RawUI.WindowSize.Width } catch { 120 }  # Cache console width
 
 # Determine run mode (use internal $currentMode since parameter validation prevents reassignment to $null)
 if ($Auto) {
@@ -86,13 +87,12 @@ function Get_RelativePath {
 function Ensure_Folder {
     param([string]$path)
     # Check cache first to avoid repeated disk checks
-    if (-not $script:createdFolders.ContainsKey($path)) {                              # $script: = access script-level variable
+    if (-not $script:createdFolders.ContainsKey($path)) {
         if (-not (Test-Path $path)) { 
-            New-Item -ItemType Directory -Path $path -Force | Out-Null                 # Create folder, suppress output to console
+            New-Item -ItemType Directory -Path $path -Force | Out-Null
             Write_Log "**Created folder:** $path"
-        } else {
-            Write_Log "**Folder already exists:** $path"
         }
+        # Only log on creation, not on "already exists" (reduces I/O significantly)
         $script:createdFolders[$path] = $true
     }
 }
@@ -160,13 +160,16 @@ function Format_ActionLine {
     
     $line = "  $Emoji $($Name.PadRight(35)) $($Operation.PadRight(20))"
     
+    # Build the middle section (paths) with fixed total width for alignment
+    $middleSection = ""
     if ($Source) {
-        $line += " FROM: $($Source.PadRight(30)) -> TO: $($Destination.PadRight(30))"
+        $middleSection = " FROM: $($Source.PadRight(25)) -> TO: $Destination"
     } elseif ($Destination) {
-        $line += " IN: $($Destination.PadRight(61))"
-    } else {
-        $line += " ".PadRight(82)
+        $middleSection = " IN: $Destination"
     }
+    
+    # Pad middle section to fixed width (60 chars) to align status emojis
+    $line += $middleSection.PadRight(60)
     
     if ($StatusEmoji) {
         $line += " $StatusEmoji"
@@ -187,39 +190,108 @@ function Scan_StartMenuShortcuts {
     Write-Host "Scanning Start Menu to generate config file..." -ForegroundColor Cyan
     Write_Log "Scanning Start Menu: $TargetPath"
     
-    # Create WScript.Shell COM object to read shortcut targets
-    $shell = New-Object -ComObject WScript.Shell
+    # Check PowerShell version for parallel processing capability
+    $canUseParallel = $PSVersionTable.PSVersion.Major -ge 7
     
-    $tree = @{}
-    
-    # Collect shortcuts grouped by relative folder, including target paths
-    Get-ChildItem -Path $TargetPath -Recurse -Filter *.lnk -Force | ForEach-Object {
-        $relativePath = $_.DirectoryName.Substring($TargetPath.Length).TrimStart('\')
-        $folder = if ([string]::IsNullOrEmpty($relativePath)) { "Root" } else { $relativePath }
+    if ($canUseParallel) {
+        # PowerShell 7+: Use parallel processing for faster scanning (especially with 100+ shortcuts)
+        Write-Host "Using parallel processing for faster scanning..." -ForegroundColor Gray
+        
+        $shortcuts = Get-ChildItem -Path $TargetPath -Recurse -Filter *.lnk -File -Force
+        
+        # Thread-safe collection for results
+        $results = [System.Collections.Concurrent.ConcurrentBag[hashtable]]::new()
+        
+        $shortcuts | ForEach-Object -Parallel {
+            $targetPath = $using:TargetPath
+            $item = $_
+            
+            # Each thread creates its own COM object (COM objects can't be shared)
+            $shell = New-Object -ComObject WScript.Shell
+            
+            try {
+                $relativePath = $item.DirectoryName.Substring($targetPath.Length).TrimStart('\')
+                $folder = if ([string]::IsNullOrEmpty($relativePath)) { "Root" } else { $relativePath }
+                
+                # Read shortcut details
+                try {
+                    $shortcut = $shell.CreateShortcut($item.FullName)
+                    $details = @{
+                        Folder = $folder
+                        Name = $item.Name
+                        TargetPath = $shortcut.TargetPath
+                        Arguments = $shortcut.Arguments
+                        WorkingDirectory = $shortcut.WorkingDirectory
+                        IconLocation = $shortcut.IconLocation
+                        Description = $shortcut.Description
+                    }
+                } catch {
+                    # Still add the shortcut even if we can't read details
+                    $details = @{
+                        Folder = $folder
+                        Name = $item.Name
+                    }
+                }
+                
+                ($using:results).Add($details)
+            } finally {
+                # Release COM object
+                [System.Runtime.Interopservices.Marshal]::ReleaseComObject($shell) | Out-Null
+            }
+        } -ThrottleLimit 5
+        
+        # Build tree from results
+        $tree = @{}
+        foreach ($result in $results) {
+            $folder = $result.Folder
+            $name = $result.Name
+            
+            if (-not $tree.ContainsKey($folder)) {
+                $tree[$folder] = @{}
+            }
+            
+            # Extract shortcut properties (everything except Folder and Name)
+            $properties = @{}
+            foreach ($key in $result.Keys) {
+                if ($key -notin @('Folder', 'Name')) {
+                    $properties[$key] = $result[$key]
+                }
+            }
+            $tree[$folder][$name] = $properties
+        }
+    } else {
+        # PowerShell 5.x: Use traditional sequential processing
+        $shell = New-Object -ComObject WScript.Shell
+        $tree = @{}
+        
+        Get-ChildItem -Path $TargetPath -Recurse -Filter *.lnk -File -Force | ForEach-Object {
+            $relativePath = $_.DirectoryName.Substring($TargetPath.Length).TrimStart('\')
+            $folder = if ([string]::IsNullOrEmpty($relativePath)) { "Root" } else { $relativePath }
 
-        if (-not $tree.ContainsKey($folder)) {
-            $tree[$folder] = @{}
+            if (-not $tree.ContainsKey($folder)) {
+                $tree[$folder] = @{}
+            }
+            
+            # Read shortcut details
+            try {
+                $shortcut = $shell.CreateShortcut($_.FullName)
+                $tree[$folder][$_.Name] = @{
+                    TargetPath = $shortcut.TargetPath
+                    Arguments = $shortcut.Arguments
+                    WorkingDirectory = $shortcut.WorkingDirectory
+                    IconLocation = $shortcut.IconLocation
+                    Description = $shortcut.Description
+                }
+            } catch {
+                Write_Log "Warning: Could not read shortcut details for $($_.Name): $_"
+                # Still add the shortcut even if we can't read details
+                $tree[$folder][$_.Name] = @{}
+            }
         }
         
-        # Read shortcut details
-        try {
-            $shortcut = $shell.CreateShortcut($_.FullName)
-            $tree[$folder][$_.Name] = @{
-                TargetPath = $shortcut.TargetPath
-                Arguments = $shortcut.Arguments
-                WorkingDirectory = $shortcut.WorkingDirectory
-                IconLocation = $shortcut.IconLocation
-                Description = $shortcut.Description
-            }
-        } catch {
-            Write_Log "Warning: Could not read shortcut details for $($_.Name): $_"
-            # Still add the shortcut even if we can't read details
-            $tree[$folder][$_.Name] = @{}
-        }
+        # Release COM object
+        [System.Runtime.Interopservices.Marshal]::ReleaseComObject($shell) | Out-Null
     }
-    
-    # Release COM object
-    [System.Runtime.Interopservices.Marshal]::ReleaseComObject($shell) | Out-Null
     
     # Add important system folders even if they have no shortcuts
     # This ensures they're preserved in ENFORCE mode
@@ -344,57 +416,9 @@ function Save_ConfigFile {
     
     Write-Host "Saving config..." -ForegroundColor Cyan
     
-    # Manually build JSON with guaranteed alphabetical sorting at all levels
-    $jsonLines = @("{")
-    $folderKeys = $ConfigTree.Keys | Sort-Object
-    $folderIndex = 0
-    
-    foreach ($folder in $folderKeys) {
-        $folderIndex++
-        $isLastFolder = ($folderIndex -eq $folderKeys.Count)
-        
-        # Escape folder name for JSON
-        $folderJson = $folder -replace '\\', '\\'
-        $jsonLines += "  `"$folderJson`": {"
-        
-        $shortcuts = $ConfigTree[$folder]
-        $shortcutKeys = $shortcuts.Keys | Sort-Object
-        $shortcutIndex = 0
-        
-        foreach ($shortcutName in $shortcutKeys) {
-            $shortcutIndex++
-            $isLastShortcut = ($shortcutIndex -eq $shortcutKeys.Count)
-            
-            # Escape shortcut name for JSON
-            $shortcutJson = $shortcutName -replace '\\', '\\'
-            $jsonLines += "    `"$shortcutJson`": {"
-            
-            $details = $shortcuts[$shortcutName]
-            $propKeys = $details.Keys | Sort-Object
-            $propIndex = 0
-            
-            foreach ($propName in $propKeys) {
-                $propIndex++
-                $isLastProp = ($propIndex -eq $propKeys.Count)
-                
-                # Escape property value for JSON
-                $propValue = $details[$propName] -replace '\\', '\\' -replace '"', '\"'
-                $comma = if ($isLastProp) { "" } else { "," }
-                $jsonLines += "      `"$propName`": `"$propValue`"$comma"
-            }
-            
-            $comma = if ($isLastShortcut) { "" } else { "," }
-            $jsonLines += "    }$comma"
-        }
-        
-        $comma = if ($isLastFolder) { "" } else { "," }
-        $jsonLines += "  }$comma"
-    }
-    
-    $jsonLines += "}"
-    
-    # Write to file
-    $jsonLines | Out-File $ConfigPath -Encoding UTF8
+    # Use built-in ConvertTo-Json (much faster than manual building)
+    # Note: Sorting is already done in Scan_StartMenuShortcuts via [ordered] hashtables
+    $ConfigTree | ConvertTo-Json -Depth 10 | Set-Content $ConfigPath -Encoding UTF8
     
     Write-Host "[OK] Config file saved successfully!" -ForegroundColor Green
     Write-Host "  Location: $ConfigPath" -ForegroundColor Gray
@@ -490,13 +514,8 @@ function Calculate_ColumnLayout {
         [int]$ColumnPadding = 4
     )
     
-    # Get console width (force refresh)
-    try {
-        $consoleWidth = $Host.UI.RawUI.WindowSize.Width
-        if ($consoleWidth -le 0) { $consoleWidth = 120 }
-    } catch {
-        $consoleWidth = 120
-    }
+    # Use cached console width (optimization: avoid repeated console queries)
+    $consoleWidth = $script:consoleWidth
     
     # Calculate available width after indent
     $availableWidth = $consoleWidth - $IndentSpaces
@@ -629,13 +648,15 @@ function Scan_AndOrganizeShortcuts {
     )
     
     Write-Host "Scanning shortcuts at $TargetPath..." -ForegroundColor Cyan
-    $allShortcuts = @(Get-ChildItem -Path $TargetPath -Recurse -Filter *.lnk -Force)
+    $allShortcuts = @(Get-ChildItem -Path $TargetPath -Recurse -Filter *.lnk -File -Force)
     
     $actualIndex = @{}
     $processed = @{}
-    $plannedMoves = [System.Collections.Generic.List[hashtable]]::new()
-    $plannedDeletes = [System.Collections.Generic.List[hashtable]]::new()
+    # Pre-allocate list capacity for better performance (estimate: ~10% of shortcuts need actions)
+    $plannedMoves = [System.Collections.Generic.List[hashtable]]::new([Math]::Max(10, $allShortcuts.Count / 10))
+    $plannedDeletes = [System.Collections.Generic.List[hashtable]]::new(10)
     $foldersToCheck = @{}
+    $quarantineCounter = @{}  # Track numbering for unknown duplicate shortcuts
 
     Write-Host "Processing $($allShortcuts.Count) shortcuts..." -ForegroundColor Cyan
 
@@ -667,7 +688,7 @@ function Scan_AndOrganizeShortcuts {
             $itemFolder = Get_RelativePath $item.DirectoryName
             $existingFolder = Get_RelativePath $existing.DirectoryName
             
-            # Delete the one in wrong location (or if both are same, keep first found)
+            # Handle known shortcuts (in config)
             if ($correctFolder) {
                 if ($itemFolder -ne $correctFolder -and $existingFolder -eq $correctFolder) {
                     # Current item is wrong, existing is correct -> delete current
@@ -676,8 +697,18 @@ function Scan_AndOrganizeShortcuts {
                     $foldersToCheck[$item.DirectoryName] = $true
                     continue
                 } elseif ($existingFolder -ne $correctFolder -and $itemFolder -eq $correctFolder) {
-                    # Existing is wrong, current is correct -> delete existing and update index
+                    # Existing is wrong, current is correct -> remove any planned move for existing, delete it, update index
                     Write_Log "  -> Deleting duplicate from wrong location: '$($existing.Name)' at $existingFolder (correct: $correctFolder)"
+                    
+                    # Remove any planned move for the existing shortcut
+                    for ($i = $plannedMoves.Count - 1; $i -ge 0; $i--) {
+                        if ($plannedMoves[$i].Source -eq $existing.FullName) {
+                            Write_Log "  -> Removing conflicting planned move for '$($existing.Name)'"
+                            $plannedMoves.RemoveAt($i)
+                            break
+                        }
+                    }
+                    
                     $plannedDeletes.Add(@{ Path = $existing.FullName; Name = $existing.Name; Folder = $existingFolder; CorrectFolder = $correctFolder })
                     $foldersToCheck[$existing.DirectoryName] = $true
                     $actualIndex[$indexKey] = $item
@@ -695,10 +726,103 @@ function Scan_AndOrganizeShortcuts {
                     continue
                 }
             } else {
-                Write_Log "  -> Neither duplicate matches config. Deleting second: '$($item.Name)'"
-                $plannedDeletes.Add(@{ Path = $item.FullName; Name = $item.Name; Folder = $itemFolder; CorrectFolder = "Unknown" })
-                $foldersToCheck[$item.DirectoryName] = $true
-                continue
+                # Handle unknown shortcuts (not in config) - need to quarantine with numbered names
+                Write_Log "  -> Both duplicates are unknown. Will quarantine with numbered names."
+                
+                # Check if either is already in the quarantine folder
+                $qFolder = Join-Path $TargetPath $QuarantineFolder
+                $itemInQuarantine = $item.DirectoryName -eq $qFolder
+                $existingInQuarantine = $existing.DirectoryName -eq $qFolder
+                
+                if ($existingInQuarantine -and -not $itemInQuarantine) {
+                    # Existing is already in quarantine, leave it alone and number the current item
+                    if (-not $quarantineCounter.ContainsKey($norm)) {
+                        $quarantineCounter[$norm] = 0
+                    }
+                    $quarantineCounter[$norm]++
+                    $number = $quarantineCounter[$norm]
+                    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($item.Name)
+                    $extension = [System.IO.Path]::GetExtension($item.Name)
+                    $numberedName = "$baseName ($number)$extension"
+                    
+                    $currentFolder = Get_RelativePath $item.DirectoryName
+                    $qDest = Join-Path $TargetPath $QuarantineFolder | Join-Path -ChildPath $numberedName
+                    
+                    $plannedMoves.Add(@{
+                        Type = "Quarantine"
+                        Source = $item.FullName
+                        Destination = $qDest
+                        Name = $item.Name
+                        NewName = $numberedName
+                        CurrentFolder = $currentFolder
+                        DestFolder = $QuarantineFolder
+                    })
+                    
+                    Write_Log "  -> Will quarantine '$($item.Name)' from $currentFolder as '$numberedName'"
+                    continue
+                } elseif ($itemInQuarantine -and -not $existingInQuarantine) {
+                    # Current item is already in quarantine, remove any planned move for existing and number the existing
+                    # Remove any planned quarantine move for the existing shortcut
+                    for ($i = $plannedMoves.Count - 1; $i -ge 0; $i--) {
+                        if ($plannedMoves[$i].Source -eq $existing.FullName) {
+                            Write_Log "  -> Removing conflicting planned quarantine for '$($existing.Name)'"
+                            $plannedMoves.RemoveAt($i)
+                            break
+                        }
+                    }
+                    
+                    # Number the existing one
+                    if (-not $quarantineCounter.ContainsKey($norm)) {
+                        $quarantineCounter[$norm] = 0
+                    }
+                    $quarantineCounter[$norm]++
+                    $number = $quarantineCounter[$norm]
+                    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($existing.Name)
+                    $extension = [System.IO.Path]::GetExtension($existing.Name)
+                    $numberedName = "$baseName ($number)$extension"
+                    
+                    $existingCurrentFolder = Get_RelativePath $existing.DirectoryName
+                    $qDest = Join-Path $TargetPath $QuarantineFolder | Join-Path -ChildPath $numberedName
+                    
+                    $plannedMoves.Add(@{
+                        Type = "Quarantine"
+                        Source = $existing.FullName
+                        Destination = $qDest
+                        Name = $existing.Name
+                        NewName = $numberedName
+                        CurrentFolder = $existingCurrentFolder
+                        DestFolder = $QuarantineFolder
+                    })
+                    
+                    Write_Log "  -> Will quarantine '$($existing.Name)' from $existingCurrentFolder as '$numberedName'"
+                    $actualIndex[$indexKey] = $item
+                } else {
+                    # Neither or both are in quarantine folder - number the current one (keep first found)
+                    if (-not $quarantineCounter.ContainsKey($norm)) {
+                        $quarantineCounter[$norm] = 0
+                    }
+                    $quarantineCounter[$norm]++
+                    $number = $quarantineCounter[$norm]
+                    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($item.Name)
+                    $extension = [System.IO.Path]::GetExtension($item.Name)
+                    $numberedName = "$baseName ($number)$extension"
+                    
+                    $currentFolder = Get_RelativePath $item.DirectoryName
+                    $qDest = Join-Path $TargetPath $QuarantineFolder | Join-Path -ChildPath $numberedName
+                    
+                    $plannedMoves.Add(@{
+                        Type = "Quarantine"
+                        Source = $item.FullName
+                        Destination = $qDest
+                        Name = $item.Name
+                        NewName = $numberedName
+                        CurrentFolder = $currentFolder
+                        DestFolder = $QuarantineFolder
+                    })
+                    
+                    Write_Log "  -> Will quarantine '$($item.Name)' as '$numberedName'"
+                    continue
+                }
             }
         }
         $actualIndex[$indexKey] = $item
@@ -760,7 +884,8 @@ function Detect_MissingShortcuts {
         [hashtable]$ShortcutDetailsMap
     )
     
-    $missingShortcuts = [System.Collections.Generic.List[hashtable]]::new()
+    # Pre-allocate with estimate (usually only a few missing shortcuts)
+    $missingShortcuts = [System.Collections.Generic.List[hashtable]]::new(10)
     $seenMissing = @{}  # Track to avoid duplicates
     
     foreach ($normName in $ExpectedMap.Keys) {
@@ -801,7 +926,9 @@ function Detect_EmptyFolders {
         $PlannedMoves = @()
     )
     
-    $emptyFoldersToDelete = [System.Collections.Generic.List[hashtable]]::new()
+    # Pre-allocate with estimate (usually only a few empty folders)
+    $emptyFoldersToDelete = [System.Collections.Generic.List[hashtable]]::new(5)
+    $seenFolders = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)  # Track to avoid duplicates
     
     # Build set of expected folders from config
     $expectedFolders = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -835,6 +962,11 @@ function Detect_EmptyFolders {
     
     foreach ($folder in $allFolders) {
         try {
+            # Skip if already processed (avoid duplicates)
+            if ($seenFolders.Contains($folder.FullName)) {
+                continue
+            }
+            
             # Skip if it's an expected folder (preserved even if empty)
             if ($expectedFolders.Contains($folder.FullName)) {
                 continue
@@ -868,6 +1000,7 @@ function Detect_EmptyFolders {
             if ($willBeEmpty) {
                 $relPath = Get_RelativePath $folder.FullName
                 Write_Log "Empty folder found: $relPath"
+                $seenFolders.Add($folder.FullName) | Out-Null
                 $emptyFoldersToDelete.Add(@{
                     Path = $folder.FullName
                     DisplayFolder = $relPath
@@ -928,10 +1061,16 @@ function Display_EnforcePreview {
         if ($toQuarantine.Count -gt 0) {
             Write_Log "UNKNOWN SHORTCUTS TO QUARANTINE ($($toQuarantine.Count)):" -Color Yellow -ToScreen
             foreach ($move in $toQuarantine) {
-                $line = Format_ActionLine -Emoji "🥅" -Name $move.Name -Operation "[Quarantine]" `
+                # Check if it's being renamed (duplicate unknown shortcut)
+                $displayName = if ($move.NewName) { "$($move.Name) -> $($move.NewName)" } else { $move.Name }
+                $line = Format_ActionLine -Emoji "🥅" -Name $displayName -Operation "[Quarantine]" `
                     -Source $move.CurrentFolder -Destination $move.DestFolder
                 Write-Host $line -ForegroundColor Yellow
-                Write_Log "  - $($move.Name) FROM: $($move.CurrentFolder) -> TO: $($move.DestFolder)"
+                if ($move.NewName) {
+                    Write_Log "  - $($move.Name) -> $($move.NewName) FROM: $($move.CurrentFolder) -> TO: $($move.DestFolder)"
+                } else {
+                    Write_Log "  - $($move.Name) FROM: $($move.CurrentFolder) -> TO: $($move.DestFolder)"
+                }
             }
             Write-Host ""
         }
@@ -990,19 +1129,28 @@ function Execute_ShortcutMoves {
             # Determine operation emoji and type based on move type
             $emoji = if ($move.Type -eq "Quarantine") { "🥅" } else { "➡️" }
             $operation = if ($move.Type -eq "Quarantine") { "[Quarantine]" } else { "[Move]" }
+            $color = if ($move.Type -eq "Quarantine") { "Yellow" } else { "Green" }
+            
+            # Display name (handle renamed shortcuts)
+            $displayName = if ($move.NewName) { "$($move.Name) -> $($move.NewName)" } else { $move.Name }
             
             # Print compact success line (optimized)
-            $line = Format_ActionLine -Emoji $emoji -Name $move.Name -Operation $operation `
+            $line = Format_ActionLine -Emoji $emoji -Name $displayName -Operation $operation `
                 -Source $move.CurrentFolder -Destination $move.DestFolder -StatusEmoji "✅"
-            Write-Host $line -ForegroundColor Green
+            Write-Host $line -ForegroundColor $color
             
-            Write_Log "$($move.Type): $($move.Name) from $($move.CurrentFolder) to $($move.DestFolder)"
+            if ($move.NewName) {
+                Write_Log "$($move.Type): $($move.Name) -> $($move.NewName) from $($move.CurrentFolder) to $($move.DestFolder)"
+            } else {
+                Write_Log "$($move.Type): $($move.Name) from $($move.CurrentFolder) to $($move.DestFolder)"
+            }
             $SuccessCount.Value++
         } catch {
-            # Print compact error line (optimized)
+            # Print compact error line (optimized - always use Red for errors regardless of type)
             $emoji = if ($move.Type -eq "Quarantine") { "🥅" } else { "➡️" }
             $operation = if ($move.Type -eq "Quarantine") { "[Quarantine]" } else { "[Move]" }
-            $line = Format_ActionLine -Emoji $emoji -Name $move.Name -Operation $operation `
+            $displayName = if ($move.NewName) { "$($move.Name) -> $($move.NewName)" } else { $move.Name }
+            $line = Format_ActionLine -Emoji $emoji -Name $displayName -Operation $operation `
                 -Source $move.CurrentFolder -Destination $move.DestFolder -StatusEmoji "❌"
             Write-Host $line -ForegroundColor Red
             
@@ -1239,9 +1387,9 @@ function Invoke_EnforceMode {
     
     # Display preview and get confirmation
     # Use @() to prevent PowerShell from unwrapping single-item collections
-    $proceed = Display_EnforcePreview -PlannedMoves $scanResults.PlannedMoves `
-        -PlannedDeletes $scanResults.PlannedDeletes `
-        -EmptyFoldersToDelete $emptyFoldersToDelete `
+    $proceed = Display_EnforcePreview -PlannedMoves @($scanResults.PlannedMoves) `
+        -PlannedDeletes @($scanResults.PlannedDeletes) `
+        -EmptyFoldersToDelete @($emptyFoldersToDelete) `
         -MissingShortcuts @($missingShortcuts) `
         -DryRun $dryRun
     
@@ -1256,7 +1404,6 @@ function Invoke_EnforceMode {
     Write-Host ("="*70) -ForegroundColor Green
     Write-Host " EXECUTION" -ForegroundColor Green
     Write-Host ("="*70) -ForegroundColor Green
-
     $successCount = 0
     $errorCount = 0
 
@@ -1283,7 +1430,7 @@ function Invoke_EnforceMode {
     
     # 4. Execute duplicate deletes
     if ($scanResults.PlannedDeletes.Count -gt 0) {
-        Execute_ShortcutDeletes -PlannedDeletes $scanResults.PlannedDeletes `
+        Execute_ShortcutDeletes -PlannedDeletes @($scanResults.PlannedDeletes) `
             -SuccessCount ([ref]$successCount) -ErrorCount ([ref]$errorCount)
     }
     
@@ -1291,11 +1438,9 @@ function Invoke_EnforceMode {
     Execute_FolderDeletes -EmptyFoldersToDelete @($emptyFoldersToDelete) `
         -SuccessCount ([ref]$successCount) -ErrorCount ([ref]$errorCount)
     
-    Write-Host ""
-    
     # Summary
     Write-Host ""
-    Write_Log "`nCompleted! $successCount successful, $errorCount errors." -Color $(if ($errorCount -eq 0) { "Green" } else { "Yellow" }) -ToScreen
+    Write_Log "Completed! $successCount successful, $errorCount errors." -Color $(if ($errorCount -eq 0) { "Green" } else { "Yellow" }) -ToScreen
     Write_Log "See log: $logPath" -Color Gray -ToScreen
 }
 
