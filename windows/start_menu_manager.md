@@ -1,41 +1,37 @@
 # 📂 Start Menu Manager
 
-## 😤 The Problem
+A dual-mode PowerShell script that automates Windows Start Menu organization. 
 
-Tired of every app and their mama randomly dumping shortcuts all over your Start Menu? One app creates a shortcut directly in the parent of Programs folder. Another decides it needs its own dedicated folder for a single shortcut. That utility you installed? It bypassed the Programs folder entirely and planted itself at the top level. You spend 20 minutes organizing everything into neat folders, feeling productive... only to have it turn into chaos again after a few weeks of installing updates and new software.
+**😤 The Problem**
 
-**Sound familiar?**
+Tired of every app randomly dumping shortcuts all over your Start Menu? One installer creates a shortcut directly in the root. Another creates a dedicated folder for a single shortcut. That utility you installed bypasses the Programs folder entirely. You spend 20 minutes organizing everything into neat folders... only to have it descend into chaos again after a few weeks of updates and new installations. Sound familiar?
 
-## 💡 The Solution
+**💡 The Solution**
 
-A dual-mode PowerShell script that automates Windows Start Menu organization. Set up your ideal folder structure once, and let the script maintain it automatically. Every shortcut knows its place, and new installations get quarantined for review instead of cluttering your organized menu.
+This script solves that problem permanently. Set up your ideal folder structure once, and let the script maintain it automatically. Every shortcut knows its place, and new installations get quarantined for review instead of cluttering your organized menu.
 
 ## ✨ Features
 
-- **Two Operating Modes**: Backup current Start Menu structure OR restore the Start Menu to a previously saved structure. 
-- **Smart Normalization**: Handles app version updates gracefully (e.g., `Chrome 120.lnk` → `Chrome 121.lnk` automatically matches)
-- **Architecture Variant Detection**: Intelligently manages duplicate variants like "ODBC (32-bit)" and "ODBC (64-bit)"
-- **Dry-Run Mode**: Preview changes before applying them (enabled by default for manual runs)
-- **Automated Scheduling**: Run daily via Windows Task Scheduler to maintain organization
+### Core Functionality
+- **Three Operating Modes**: 
+  - **READ** - Display your current config structure without making changes
+  - **SAVE** - Backup current Start Menu structure to a JSON config file
+  - **ENFORCE** - Restore the Start Menu to match your saved structure
+- **Smart Normalization**: Handles app version updates gracefully (e.g., `Chrome v120 (64-bit).lnk` → `Chrome v121.lnk` automatically matches)
+- **Architecture Variant Detection**: Intelligently manages different variants like "ODBC (32-bit)" and "ODBC (64-bit)" as separate entries
+- **Duplicate Management**: Automatically detects and removes duplicate shortcuts, keeping the one in the correct location
+- **Quarantine System**: Moves unrecognized shortcuts to `Programs\Unsorted` with automatic numbering for duplicates
+
+### Performance & Usability
+- **Parallel Processing**: PowerShell 7+ automatically uses multi-threading for 2-3x faster scanning on systems with 100+ shortcuts
+- **Dry-Run Mode**: Preview all changes before applying them (enabled by default for manual runs)
+- **Interactive Menu**: User-friendly menu system for selecting modes
 - **Comprehensive Logging**: All actions logged with timestamps and detailed information
-- **Quarantine Unknown Shortcuts**: Automatically moves unrecognized shortcuts to "Unsorted" folder
+- **Auto-Elevation**: Automatically requests admin privileges when needed
 
-## 🔮 How It Works
-
-### 💾 SAVE Mode
-1. Scans your entire Start Menu structure
-2. Groups shortcuts by their current folders
-3. Generates a JSON configuration file with alphabetically sorted folders and shortcuts
-4. Outputs: `StartMenuConfig.json`
-
-### 🛡️ ENFORCE Mode
-1. Reads the configuration file
-2. Scans all current Start Menu shortcuts
-3. Compares current locations with expected locations
-4. In **manual mode**: Shows preview and asks for confirmation
-5. In **automated mode**: Executes changes immediately
-6. Moves misplaced shortcuts to correct folders
-7. Quarantines unknown shortcuts to "Programs\Unsorted"
+### Automation
+- **Scheduled Task Support**: Run daily via Windows Task Scheduler to maintain organization
+- **Automated Mode**: Non-interactive execution for scheduled tasks with `-Auto` flag
 
 ## 🔬 Technical Details: Start Menu Locations
 
@@ -80,11 +76,11 @@ If you're the only user or want to manage everything from one place, create a **
 # ⚠️ CAUTION: Advanced users only! Backup first!
 # Run PowerShell as Administrator
 
-# 1. Remove existing user Start Menu (backup first!)
+# 1. Backup and consolidate shortcuts
 $userMenu = "$env:APPDATA\Microsoft\Windows\Start Menu"
 $allUsersMenu = "C:\ProgramData\Microsoft\Windows\Start Menu"
 
-# Backup your user shortcuts first
+# Move user shortcuts to all-users location
 Move-Item "$userMenu\Programs\*" "$allUsersMenu\Programs\" -Force
 
 # Remove the old folder
@@ -110,41 +106,55 @@ cmd /c mklink /J "$userMenu\Programs" "$allUsersMenu\Programs"
 
 - Windows 10/11
 - PowerShell 5.1 or higher
-- Administrator privileges (for scheduled task setup only, or junction creation)
+  - **PowerShell 7+** recommended for 2-3x faster performance via parallel processing
+- Administrator privileges (for ENFORCE mode and scheduled task setup)
 
 ## ⚒️ Setup
 
 ### 1️⃣ Initial Configuration
 
-Go to the Start Menu folder and organize it the way you want. Once you are happy with it, prepare the script. Edit the variables at the top of `start_menu_manager.ps1` to match your paths:
+Edit the `start_menu_manager.ps1` script configuration variables to match your paths:
 
 ```powershell
 $target           = "C:\ProgramData\Microsoft\Windows\Start Menu"
-$configPath       = "D:\OneDrive\Backups\StartMenuConfig.json"
-$logPath          = "D:\OneDrive\Backups\StartMenuManager.log"
+$configPath       = "D:\OneDrive\Backups\Start Menu\StartMenuConfig.json"
+$logPath          = "D:\OneDrive\Backups\Start Menu\StartMenuManager.log"
 $quarantineFolder = "Programs\Unsorted"
 ```
 
-Launch a PowerShell terminal and run the script to generate your baseline configuration: 
+### 2️⃣ Organize Your Start Menu
 
-```powershell
-.\start_menu_manager.ps1 -Save
-```
+Manually organize your Start Menu folders exactly how you want them. Take your time - this becomes your baseline.
 
-This creates `StartMenuConfig.json` with your current Start Menu structure.
+### 3️⃣ Generate Your Configuration
 
-### 2️⃣ Test Your Configuration
-
-To test, misplace some of the shortcuts in the Start Menu folder, and then run the script in manual mode (dry-run is enabled by default):
+Launch PowerShell and run:
 
 ```powershell
 .\start_menu_manager.ps1
 ```
-This shows what would change and asks for confirmation before proceeding.
 
-### 3️⃣ Set Up Automation (Optional)
+Select option **[2] SAVE** from the menu, or run directly:
 
-To run the script automatically every day, create a Windows Scheduled Task:
+```powershell
+.\start_menu_manager.ps1 -Mode SAVE
+```
+
+This creates `StartMenuConfig.json` with your current Start Menu structure.
+
+### 4️⃣ Test Your Configuration
+
+Intentionally misplace some shortcuts, then run the script in manual mode:
+
+```powershell
+.\start_menu_manager.ps1
+```
+
+Select option **[3] ENFORCE** from the menu. The script will show you what would change and ask for confirmation before proceeding.
+
+### 5️⃣ Set Up Automation (Optional)
+
+To run the script automatically every day:
 
 1. **Open Task Scheduler**: Press `Win + R`, type `taskschd.msc`, press Enter
 
@@ -163,10 +173,12 @@ To run the script automatically every day, create a Windows Scheduled Task:
 
 5. **Actions Tab**:
    - Click "New..." → Action: `Start a program`
-   - Program/script: `PowerShell.exe`
+   - Program/script: Browse to your PowerShell executable
+     - PowerShell 7: `C:\Program Files\PowerShell\7\pwsh.exe` (recommended)
+     - PowerShell 5: `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`
    - Add arguments (all on one line):
    ```
-   -NoProfile -ExecutionPolicy Bypass -File "D:\Path\To\Your\start_menu_manager.ps1" -Automated
+   -NoProfile -ExecutionPolicy Bypass -File "D:\Path\To\Your\start_menu_manager.ps1" -Auto
    ```
    - ⚠️ **Replace with your actual script path!**
    - Click OK
@@ -184,69 +196,181 @@ To run the script automatically every day, create a Windows Scheduled Task:
 
 ## 🚀 Usage
 
-### 🖱️ Manual Execution
+### 🖱️ Interactive Menu
 
-**Generate/Update Configuration:**
-```powershell
-.\start_menu_manager.ps1 -Save
-```
+Simply run the script without parameters to access the interactive menu:
 
-**Restore Start Menu (with preview):**
 ```powershell
 .\start_menu_manager.ps1
 ```
 
-**Restore Start Menu (no preview):**
+You'll see:
+```
+======================================================================================================
+ START MENU MANAGER - Select Mode
+======================================================================================================
+
+  [1] READ    - Display current config structure
+  [2] SAVE    - Save current Start Menu to config
+  [3] ENFORCE - Organize Start Menu based on config
+  [4] EXIT    - Exit the script
+
+Select an option (1-4):
+```
+
+### 📝 Direct Mode Selection
+
+**Display current configuration:**
 ```powershell
-.\start_menu_manager.ps1 -Automated
+.\start_menu_manager.ps1 -Mode READ
+```
+
+**Generate/update configuration:**
+```powershell
+.\start_menu_manager.ps1 -Mode SAVE
+```
+
+**Restore Start Menu (with preview):**
+```powershell
+.\start_menu_manager.ps1 -Mode ENFORCE
+```
+
+**Restore Start Menu (automated, no preview):**
+```powershell
+.\start_menu_manager.ps1 -Auto
 ```
 
 ### 📊 Understanding the Output
 
-**Terminal Output:**
+#### Terminal Output (Preview Mode)
+
 ```powershell
 MODE: ENFORCE, MANUAL
 
 Scanning shortcuts at C:\ProgramData\Microsoft\Windows\Start Menu...
 Processing 135 shortcuts...
 
-====================================================================
+======================================================================
  SUMMARY - Planned Changes
-====================================================================
+======================================================================
 
-MOVES TO CORRECT FOLDERS (5):
-  - Chrome 121.lnk
-    FROM: Root -> TO: Programs
-  - Steam.lnk
-    FROM: Programs -> TO: Programs\Gaming
+MOVES TO CORRECT FOLDERS (3):
+  ➡️ Chrome.lnk                           [Move]               FROM: Root                      -> TO: Programs                       
+
+MISSING SHORTCUTS TO RECREATE (1):
+  ➕ WinRAR.lnk                           [Recreate]           IN: Programs                                                           
 
 UNKNOWN SHORTCUTS TO QUARANTINE (2):
-  - Unknown App.lnk
-    FROM: Programs -> TO: Programs\Unsorted
+  🥅 Unknown App.lnk                      [Quarantine]         FROM: Programs                  -> TO: Programs\Unsorted              
+  🥅 what.lnk -> what (1).lnk             [Quarantine]         FROM: Programs\New folder       -> TO: Programs\Unsorted              
 
-====================================================================
+DUPLICATE SHORTCUTS TO DELETE (1):
+  🎭 WeMod.lnk                            [Delete]             IN: Programs                                                           
 
-Do you want to proceed with these changes? (Y/N): 
+EMPTY FOLDERS TO DELETE (1):
+  🗑️ Programs\New folder                  [Delete]                                                                                   
+
+======================================================================
+
+Do you want to proceed with these changes? (Y/N):
 ```
 
-**Log File Format:**
+#### Execution Output
+
 ```
-============================== 11/04/2025 19:00:00 ==============================
+======================================================================
+ EXECUTION
+======================================================================
+➡️ Chrome.lnk                           [Move]               FROM: Root                      -> TO: Programs                        ✅
+➕ WinRAR.lnk                           [Recreate]           IN: Programs                                                           ✅
+🥅 Unknown App.lnk                      [Quarantine]         FROM: Programs                  -> TO: Programs\Unsorted               ✅
+🥅 what.lnk -> what (1).lnk             [Quarantine]         FROM: Programs\New folder       -> TO: Programs\Unsorted               ✅
+🎭 WeMod.lnk                            [Delete]             IN: Programs                                                           ✅
+🗑️ Programs\New folder                  [Delete]                                                                                    ✅
+
+Completed! 6 successful, 0 errors.
+See log: D:\OneDrive\Backups\Start Menu\StartMenuManager.log
+```
+
+#### Log File Format
+
+```
+============================== 11/09/2025 19:00:00 ==============================
 
 MODE: ENFORCE, AUTOMATED
 
-Moved: Chrome 121.lnk FROM: Root -> TO: Programs
-Quarantined: Unknown App.lnk FROM: Programs -> TO: Programs\Unsorted
+Scanning shortcuts at C:\ProgramData\Microsoft\Windows\Start Menu...
+Processing 135 shortcuts...
 
-Completed! 2 successful, 0 errors.
+Move: Chrome.lnk from Root to Programs
+Recreate: WinRAR.lnk in Programs
+Quarantine: Unknown App.lnk from Programs to Programs\Unsorted
+Quarantine: what.lnk -> what (1).lnk from Programs\New folder to Programs\Unsorted
+Deleted duplicate: WeMod.lnk from Programs
+Deleted empty folder: Programs\New folder
+
+Completed! 6 successful, 0 errors.
 ```
+
+## 🎯 How It Works
+
+### 💾 SAVE Mode
+1. Scans your entire Start Menu structure recursively
+2. Reads shortcut details (target path, arguments, icon, description)
+3. Groups shortcuts by their current folders
+4. Generates a JSON configuration file with alphabetically sorted folders and shortcuts
+5. Creates a timestamped zip backup of your entire Start Menu
+6. **PowerShell 7+**: Uses parallel processing (5 threads) for 2-3x faster scanning
+
+### 📖 READ Mode
+1. Loads the configuration file
+2. Displays the folder structure with shortcut counts
+3. Shows shortcuts in column layout for easy reading
+4. No changes made to the file system
+
+### 🛡️ ENFORCE Mode
+
+**Planning Phase:**
+1. Loads the configuration file and builds lookup tables
+2. Scans all current Start Menu shortcuts
+3. Compares current locations with expected locations
+4. Identifies actions needed:
+   - **Moves**: Shortcuts in wrong folders
+   - **Recreations**: Missing shortcuts (uses saved details)
+   - **Quarantines**: Unknown shortcuts (not in config)
+   - **Duplicate Deletes**: Multiple copies of the same shortcut
+   - **Folder Cleanups**: Empty folders after moves
+
+**Preview Phase (Manual Mode):**
+- Displays all planned changes with emojis and formatting
+- Shows before/after locations for moves
+- Asks for user confirmation: `Do you want to proceed with these changes? (Y/N)`
+
+**Execution Phase:**
+1. Creates necessary folders
+2. **Moves** shortcuts to correct folders
+3. **Recreates** missing shortcuts with original properties
+4. **Quarantines** unknown shortcuts (with numbered names for duplicates: `app.lnk`, `app (1).lnk`, etc.)
+5. **Deletes** duplicate shortcuts (keeps the one in the correct location)
+6. **Removes** empty folders
+7. Displays results with success/error indicators (✅/❌)
 
 ## 🏥 Quarantine Folder
 
-Any shortcut not listed in your config gets moved to `Programs\Unsorted`. This prevents cluttering your organized folders with new installations. Periodically check this folder and either:
-1. Add desired shortcuts to your config (in their proper folders)
-2. Delete unwanted shortcuts
-3. Re-run with `-Save` to update your config with the new structure
+Any shortcut not listed in your config gets moved to `Programs\Unsorted`. This prevents cluttering your organized folders with new installations.
+
+**Handling Quarantined Shortcuts:**
+
+Periodically review `Programs\Unsorted` and:
+1. **Keep & Organize**: Move desired shortcuts to proper folders, then run `-Mode SAVE` to update config
+2. **Delete**: Remove unwanted shortcuts
+3. **Leave in Quarantine**: They'll stay there until you decide
+
+**Duplicate Unknown Shortcuts:**
+If the script finds multiple copies of an unknown shortcut, it automatically numbers them:
+- First one: `app.lnk` (or keeps existing name in quarantine)
+- Second one: `app (1).lnk`
+- Third one: `app (2).lnk`
 
 ## 🔧 Troubleshooting
 
@@ -254,21 +378,39 @@ Any shortcut not listed in your config gets moved to `Programs\Unsorted`. This p
 
 **Problem:** Script can't find `StartMenuConfig.json`
 
-**Solution:** Run `.\start_menu_manager.ps1 -Save` to generate it
+**Solution:** Run the script with `-Mode SAVE` to generate it first
+
+### ⚙️ PowerShell Version Check
+
+**Check your version:**
+```powershell
+$PSVersionTable.PSVersion
+```
+
+**Upgrade to PowerShell 7 for better performance:**
+- Download from: https://github.com/PowerShell/PowerShell/releases
+- Parallel processing provides 2-3x speedup for systems with 100+ shortcuts
 
 ### ⏰ Scheduled Task Not Running
 
 **Problem:** Task shows in Task Scheduler but doesn't execute
 
-**Possible causes:**
+**Possible causes and solutions:**
+
 1. **Access Denied (0x1)**: Task running as SYSTEM can't access OneDrive paths
-   - Solution: Edit the task → General tab → Change user account to your own account instead of SYSTEM
-2. **File locked**: Log file open in editor
-   - Solution: Close the log file before task runs
-3. **Script path changed**: Task points to old location
-   - Solution: Edit the task → Actions tab → Update the script path
-4. **Wrong arguments**: Missing or incorrect `-Automated` flag
-   - Solution: Edit the task → Actions tab → Verify arguments include `-Automated`
+   - **Solution**: Edit task → General tab → Change user to your own account (not SYSTEM)
+
+2. **File Locked**: Log file open in an editor
+   - **Solution**: Close the log file before the task runs
+
+3. **Wrong Script Path**: Task points to old location
+   - **Solution**: Edit task → Actions tab → Update the file path
+
+4. **Wrong Arguments**: Missing or incorrect `-Auto` flag
+   - **Solution**: Edit task → Actions tab → Verify arguments include `-Auto` (not `-Automated`)
+
+5. **PowerShell Execution Policy**: Scripts blocked
+   - **Solution**: Ensure arguments include `-ExecutionPolicy Bypass`
 
 ### 📄 Shortcuts Lose Icons After Moving
 
@@ -277,27 +419,102 @@ Any shortcut not listed in your config gets moved to `Programs\Unsorted`. This p
 **Cause:** Windows icon cache needs refresh
 
 **Solution:**
-Quick fix: Restart Windows Explorer from Task Manager
+1. Quick fix: Restart Windows Explorer
+   - Open Task Manager (Ctrl+Shift+Esc)
+   - Find "Windows Explorer" → Right-click → Restart
+2. If icons still broken, recreate the shortcut using the script's recreation feature
 
+### 🔒 Permission Errors During Execution
+
+**Problem:** "Access denied" errors when moving shortcuts
+
+**Solution:**
+- ENFORCE mode requires administrator privileges
+- The script will auto-elevate if needed
+- Ensure your user account has admin rights
+- Check that antivirus isn't blocking the script
+
+### 🐌 Slow Performance with Many Shortcuts
+
+**Problem:** Script takes a long time to scan
+
+**Optimization tips:**
+1. **Upgrade to PowerShell 7**: Get 2-3x speedup with parallel processing
+   - Script automatically detects and uses parallel mode on PowerShell 7+
+2. **Close other programs**: Reduces I/O contention
+3. **Check disk health**: Slow disk can impact scanning speed
 
 ## 💎 Best Practices
 
-1. **Start Clean**: Run `-Save` on a freshly organized Start Menu to create your ideal baseline
+1. **Start Clean**: Run `-Mode SAVE` on a freshly organized Start Menu to create your ideal baseline
 2. **Regular Maintenance**: Check quarantine folder weekly for new installations
-3. **Backup Config**: Keep a copy of your `StartMenuConfig.json` - it's your organizational blueprint
-4. **Test Changes**: Always run manual mode first after editing config
+3. **Backup Config**: Keep a copy of `StartMenuConfig.json` - it's your organizational blueprint
+4. **Test Changes**: Always run manual mode first after editing the config
 5. **Review Logs**: Periodically check the log file for errors or unexpected behavior
+6. **Use PowerShell 7**: Get significant performance improvements with parallel processing
+7. **Version Control**: Store your config in Git/OneDrive for history and backup
+
+## 🎨 Customization
+
+### Change Quarantine Folder
+
+Edit line 14 in the script:
+```powershell
+$quarantineFolder = "Programs\My Custom Folder"  # Relative to $target
+```
+
+### Adjust Normalization Rules
+
+Edit the `Normalize_ShortcutName` function (lines 100-122) to customize how shortcuts are matched across versions:
+
+```powershell
+$n = $name -replace '\s*\((Preview|Beta|Insiders|64-bit|32-bit|x64|x86)\)', '' `
+           -replace '\s*v?\d+(\.\d+)*', '' `
+           -replace '\s+-\s+Setup$', '' `
+           -replace '\s+', ' '
+```
+
+### Preserve Additional System Folders
+
+Edit line 298 to add folders that should never be deleted:
+```powershell
+$systemFolders = @("Programs\Startup", "Programs\Administrative Tools")
+```
 
 ## ❓ FAQ
+
 **Q: What about Microsoft Store apps?**  
 A: Store apps don't use `.lnk` shortcuts - they're managed separately by Windows. This script only handles traditional shortcuts.
 
 **Q: Can I have the same shortcut in multiple folders?**  
-A: No, each shortcut can only be in one location. The config uses a flat lookup where each shortcut maps to one folder.
+A: No, each shortcut can only be in one location. The config uses a flat lookup where each shortcut maps to exactly one folder.
 
 **Q: Does this work with shortcuts in nested folders?**  
-A: Yes! The script recursively scans all folders. 
+A: Yes! The script recursively scans all folders at any depth (e.g., `Programs\Development\IDEs\Visual Studio.lnk`).
 
 **Q: Will this break anything?**  
 A: No. It only moves `.lnk` files, which are just pointers. The actual programs remain untouched. However, pinned Start Menu tiles may need to be re-pinned if their shortcuts move.
 
+**Q: Can I exclude certain shortcuts from being moved?**  
+A: Add them to your config in their current location, then they'll be left alone. Alternatively, don't include them in the config and they'll be quarantined.
+
+**Q: What if I accidentally delete my config file?**  
+A: Just re-run `-Mode SAVE` to create a new config based on your current Start Menu state. The script also creates automatic timestamped zip backups.
+
+**Q: Does it work on Windows Server?**  
+A: Yes, as long as PowerShell 5.1+ is installed. The script works on any Windows version with a Start Menu.
+
+**Q: Can I run this on multiple computers with the same config?**  
+A: Yes! Store your config in OneDrive/Dropbox and point all machines to the same file. Great for maintaining consistent organization across devices.
+
+## 📄 License
+
+This script is provided as-is without warranty. Feel free to modify and distribute.
+
+## 🤝 Contributing
+
+Found a bug or have a feature request? Contributions welcome!
+
+---
+
+**Made with ❤️ for everyone tired of Start Menu chaos**
