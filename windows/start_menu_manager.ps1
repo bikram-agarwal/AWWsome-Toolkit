@@ -659,7 +659,6 @@ function Detect_MissingShortcuts {
             
             # Skip if already processed
             if ($seenMissing.ContainsKey($uniqueKey)) {
-                Write_Log "  [DEBUG] Skipping duplicate missing shortcut: $uniqueKey"
                 continue
             }
             $seenMissing[$uniqueKey] = $true
@@ -675,21 +674,20 @@ function Detect_MissingShortcuts {
                     Folder = $expectedFolder
                     Details = $details
                 })
-                Write_Log "  [DEBUG] Added to recreation list: $normName -> $($details.TargetPath)"
             } else {
-                Write_Log "  Cannot recreate - no saved details for $normName (detailKey: $detailKey)"
+                Write_Log "  Cannot recreate - no saved details for $normName"
             }
         }
     }
     
-    Write_Log "[DEBUG] Total missing shortcuts to recreate: $($missingShortcuts.Count)"
     return $missingShortcuts
 }
 
 function Detect_EmptyFolders {
     param(
         [string]$TargetPath,
-        [PSCustomObject]$ConfigRaw
+        [PSCustomObject]$ConfigRaw,
+        $PlannedMoves = @()
     )
     
     $emptyFoldersToDelete = [System.Collections.Generic.List[hashtable]]::new()
@@ -703,6 +701,23 @@ function Detect_EmptyFolders {
         }
     }
     
+    # Build sets of folders being emptied/filled by moves
+    $foldersBeingEmptied = @{}
+    $foldersReceivingFiles = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    
+    foreach ($move in @($PlannedMoves)) {
+        # Track source folders losing files
+        $sourceFolder = Split-Path $move.Source -Parent
+        if (-not $foldersBeingEmptied.ContainsKey($sourceFolder)) {
+            $foldersBeingEmptied[$sourceFolder] = @()
+        }
+        $foldersBeingEmptied[$sourceFolder] += $move.Source
+        
+        # Track destination folders receiving files
+        $destFolder = Split-Path $move.Destination -Parent
+        $foldersReceivingFiles.Add($destFolder) | Out-Null
+    }
+    
     # Scan ALL folders (deepest first for proper deletion order)
     $allFolders = Get-ChildItem -Path $TargetPath -Directory -Recurse -Force -ErrorAction SilentlyContinue | 
         Sort-Object { $_.FullName.Split('\').Count } -Descending
@@ -714,11 +729,32 @@ function Detect_EmptyFolders {
                 continue
             }
             
+            # Skip if this folder is receiving files from moves (won't be empty)
+            if ($foldersReceivingFiles.Contains($folder.FullName)) {
+                continue
+            }
+            
             # Check if folder is currently empty
             $items = Get-ChildItem -Path $folder.FullName -Force -ErrorAction SilentlyContinue
             $currentCount = if ($null -eq $items) { 0 } else { $items.Count }
             
+            $willBeEmpty = $false
+            
             if ($currentCount -eq 0) {
+                $willBeEmpty = $true
+            } elseif ($foldersBeingEmptied.ContainsKey($folder.FullName)) {
+                # Check if ALL items in this folder are being moved out
+                $movingOut = $foldersBeingEmptied[$folder.FullName]
+                $allItemPaths = $items | ForEach-Object { $_.FullName }
+                
+                # If all items are in the moving-out list, folder will be empty
+                $remaining = $allItemPaths | Where-Object { $_ -notin $movingOut }
+                if ($remaining.Count -eq 0) {
+                    $willBeEmpty = $true
+                }
+            }
+            
+            if ($willBeEmpty) {
                 $relPath = Get_RelativePath $folder.FullName
                 Write_Log "Empty folder found: $relPath"
                 $emptyFoldersToDelete.Add(@{
@@ -751,25 +787,35 @@ function Display_EnforcePreview {
         Write-Host ("="*70) -ForegroundColor Cyan
         Write-Host ""
     
-        # Show moves
-        $toMove = $PlannedMoves | Where-Object { $_.Type -eq "Move" }
+        # Show moves (wrap in @() to prevent unwrapping single items)
+        $toMove = @($PlannedMoves | Where-Object { $_.Type -eq "Move" })
         if ($toMove.Count -gt 0) {
             Write_Log "MOVES TO CORRECT FOLDERS ($($toMove.Count)):" -Color Green -ToScreen
             foreach ($move in $toMove) {
-                Write-Host "  - $($move.Name)" -ForegroundColor White
-                Write-Host "    FROM: $($move.CurrentFolder) -> TO: $($move.DestFolder)" -ForegroundColor Gray
+                Write-Host "  ➡️ " -NoNewline -ForegroundColor Green
+                Write-Host "$($move.Name.PadRight(35)) " -NoNewline -ForegroundColor White
+                Write-Host "$("[Move]".PadRight(20)) " -NoNewline -ForegroundColor Green
+                Write-Host "FROM: " -NoNewline -ForegroundColor DarkGray
+                Write-Host "$($move.CurrentFolder.PadRight(30)) " -NoNewline -ForegroundColor Gray
+                Write-Host "-> TO: " -NoNewline -ForegroundColor DarkGray
+                Write-Host "$($move.DestFolder)" -ForegroundColor Gray
                 Write_Log "  - $($move.Name) FROM: $($move.CurrentFolder) -> TO: $($move.DestFolder)"
             }
             Write-Host ""
         }
     
-        # Show quarantines
-        $toQuarantine = $PlannedMoves | Where-Object { $_.Type -eq "Quarantine" }
+        # Show quarantines (wrap in @() to prevent unwrapping single items)
+        $toQuarantine = @($PlannedMoves | Where-Object { $_.Type -eq "Quarantine" })
         if ($toQuarantine.Count -gt 0) {
             Write_Log "UNKNOWN SHORTCUTS TO QUARANTINE ($($toQuarantine.Count)):" -Color Yellow -ToScreen
             foreach ($move in $toQuarantine) {
-                Write-Host "  - $($move.Name)" -ForegroundColor White
-                Write-Host "    FROM: $($move.CurrentFolder) -> TO: $($move.DestFolder)" -ForegroundColor Gray
+                Write-Host "  🥅 " -NoNewline -ForegroundColor Yellow
+                Write-Host "$($move.Name.PadRight(35)) " -NoNewline -ForegroundColor White
+                Write-Host "$("[Quarantine]".PadRight(20)) " -NoNewline -ForegroundColor Yellow
+                Write-Host "FROM: " -NoNewline -ForegroundColor DarkGray
+                Write-Host "$($move.CurrentFolder.PadRight(30)) " -NoNewline -ForegroundColor Gray
+                Write-Host "-> TO: " -NoNewline -ForegroundColor DarkGray
+                Write-Host "$($move.DestFolder)" -ForegroundColor Gray
                 Write_Log "  - $($move.Name) FROM: $($move.CurrentFolder) -> TO: $($move.DestFolder)"
             }
             Write-Host ""
@@ -784,29 +830,29 @@ function Display_EnforcePreview {
             Write-Host ""
         }
         
-        # Show empty folders
+        # Show empty folders (wrap in @() to handle single items correctly)
         if ($EmptyFoldersToDelete.Count -gt 0) {
             Write_Log "EMPTY FOLDERS TO DELETE ($($EmptyFoldersToDelete.Count)):" -Color Magenta -ToScreen
-            foreach ($folder in $EmptyFoldersToDelete) {
-                Write_Log "  - $($folder.DisplayFolder)" -Color Magenta -ToScreen
+            foreach ($folder in @($EmptyFoldersToDelete)) {
+                Write-Host "  🗑️ " -NoNewline -ForegroundColor Magenta
+                Write-Host "$($folder.DisplayFolder.PadRight(35)) " -NoNewline -ForegroundColor Magenta
+                Write-Host "$("[Delete]".PadRight(20))" -ForegroundColor Magenta
+                Write_Log "  - $($folder.DisplayFolder)"
             }
             Write-Host ""
         }
         
         # Show missing shortcuts to recreate
         if ($MissingShortcuts.Count -gt 0) {
-            Write_Log "[DEBUG] MissingShortcuts type: $($MissingShortcuts.GetType().FullName), Count: $($MissingShortcuts.Count)"
             Write_Log "MISSING SHORTCUTS TO RECREATE ($($MissingShortcuts.Count)):" -Color Cyan -ToScreen
-            $displayCount = 0
             foreach ($missing in $MissingShortcuts) {
-                if ($missing -and $missing.Name) {
-                    $displayCount++
-                    Write_Log "  - $($missing.Name) IN: $($missing.Folder)" -Color Cyan -ToScreen
-                } else {
-                    Write_Log "  - [ERROR: Invalid missing shortcut entry - Type: $($missing.GetType().FullName)]" -Color Red -ToScreen
-                }
+                Write-Host "  ➕ " -NoNewline -ForegroundColor Cyan
+                Write-Host "$($missing.Name.PadRight(35)) " -NoNewline -ForegroundColor White
+                Write-Host "$("[Recreate]".PadRight(20)) " -NoNewline -ForegroundColor Cyan
+                Write-Host "IN: " -NoNewline -ForegroundColor DarkGray
+                Write-Host "$($missing.Folder)" -ForegroundColor Gray
+                Write_Log "  - $($missing.Name) IN: $($missing.Folder)"
             }
-            Write_Log "[DEBUG] Actually displayed: $displayCount items"
             Write-Host ""
         }
         
@@ -822,14 +868,12 @@ function Display_EnforcePreview {
 
 function Execute_ShortcutMoves {
     param(
-        [System.Collections.Generic.List[hashtable]]$PlannedMoves,
+        $PlannedMoves,
         [ref]$SuccessCount,
         [ref]$ErrorCount
     )
     
     if ($PlannedMoves.Count -eq 0) { return }
-    
-    Write_Log "Executing $($PlannedMoves.Count) move operations..." -Color Cyan -ToScreen
     
     foreach ($move in $PlannedMoves) {
         try {
@@ -837,15 +881,38 @@ function Execute_ShortcutMoves {
             $destFolder = Split-Path $move.Destination -Parent
             Ensure_Folder $destFolder
             
-            Write-Host "Processing: $($move.Name)..." -ForegroundColor Gray
-            
             # Use PowerShell Move-Item (requires admin privileges)
             Move-Item -Path $move.Source -Destination $move.Destination -Force -ErrorAction Stop
-            Write_Log "  [OK] $($move.Type): $($move.Name) to $($move.DestFolder)" -Color Green -ToScreen
+            
+            # Determine operation emoji and type based on move type
+            $emoji = if ($move.Type -eq "Quarantine") { "🥅" } else { "➡️" }
+            $operation = if ($move.Type -eq "Quarantine") { "[Quarantine]" } else { "[Move]" }
+            
+            # Print compact success line with operation-specific emoji, alignment, and status at end
+            Write-Host "  $emoji " -NoNewline -ForegroundColor Green
+            Write-Host "$($move.Name.PadRight(35)) " -NoNewline -ForegroundColor White
+            Write-Host "$($operation.PadRight(20)) " -NoNewline -ForegroundColor Green
+            Write-Host "FROM: " -NoNewline -ForegroundColor DarkGray
+            Write-Host "$($move.CurrentFolder.PadRight(30)) " -NoNewline -ForegroundColor Gray
+            Write-Host "-> TO: " -NoNewline -ForegroundColor DarkGray
+            Write-Host "$($move.DestFolder.PadRight(30)) " -NoNewline -ForegroundColor Gray
+            Write-Host "✅" -ForegroundColor Green
+            
             Write_Log "$($move.Type): $($move.Name) from $($move.CurrentFolder) to $($move.DestFolder)"
             $SuccessCount.Value++
         } catch {
-            Write_Log "  [ERROR] Error: $($move.Name) - $_" -Color Red -ToScreen
+            # Print compact error line with status at end
+            $emoji = if ($move.Type -eq "Quarantine") { "🥅" } else { "➡️" }
+            $operation = if ($move.Type -eq "Quarantine") { "[Quarantine]" } else { "[Move]" }
+            Write-Host "  $emoji " -NoNewline
+            Write-Host "$($move.Name.PadRight(35)) " -NoNewline -ForegroundColor White
+            Write-Host "$($operation.PadRight(20)) " -NoNewline -ForegroundColor Red
+            Write-Host "FROM: " -NoNewline -ForegroundColor DarkGray
+            Write-Host "$($move.CurrentFolder.PadRight(30)) " -NoNewline -ForegroundColor Gray
+            Write-Host "-> TO: " -NoNewline -ForegroundColor DarkGray
+            Write-Host "$($move.DestFolder.PadRight(30)) " -NoNewline -ForegroundColor Gray
+            Write-Host "❌" -ForegroundColor Red
+            
             Write_Log "$($move.Type) failed: $($move.Name) - $_"
             $ErrorCount.Value++
         }
@@ -854,7 +921,7 @@ function Execute_ShortcutMoves {
 
 function Execute_ShortcutRecreations {
     param(
-        [System.Collections.Generic.List[hashtable]]$MissingShortcuts,
+        $MissingShortcuts,
         [string]$TargetPath,
         [ref]$SuccessCount,
         [ref]$ErrorCount
@@ -862,7 +929,6 @@ function Execute_ShortcutRecreations {
     
     if ($MissingShortcuts.Count -eq 0) { return }
     
-    Write_Log "Recreating $($MissingShortcuts.Count) missing shortcuts..." -Color Cyan -ToScreen
     $shell = New-Object -ComObject WScript.Shell
     
     foreach ($missing in $MissingShortcuts) {
@@ -875,7 +941,6 @@ function Execute_ShortcutRecreations {
             Ensure_Folder $folder
             
             $shortcutPath = Join-Path $folder $missing.Name
-            Write-Host "Recreating: $($missing.Name)..." -ForegroundColor Gray
             
             $shortcut = $shell.CreateShortcut($shortcutPath)
             $shortcut.TargetPath = $missing.Details.TargetPath
@@ -885,11 +950,25 @@ function Execute_ShortcutRecreations {
             if ($missing.Details.Description) { $shortcut.Description = $missing.Details.Description }
             $shortcut.Save()
             
-            Write_Log "  [OK] Recreated: $($missing.Name) in $($missing.Folder)" -Color Green -ToScreen
+            # Print compact success line with recreation emoji, alignment, and status at end
+            Write-Host "  ➕ " -NoNewline -ForegroundColor Cyan
+            Write-Host "$($missing.Name.PadRight(35)) " -NoNewline -ForegroundColor White
+            Write-Host "$("[Recreate]".PadRight(20)) " -NoNewline -ForegroundColor Cyan
+            Write-Host "IN: " -NoNewline -ForegroundColor DarkGray
+            Write-Host "$($missing.Folder.PadRight(61)) " -NoNewline -ForegroundColor Gray
+            Write-Host "✅" -ForegroundColor Green
+            
             Write_Log "Recreated: $($missing.Name) in $($missing.Folder)"
             $SuccessCount.Value++
         } catch {
-            Write_Log "  [ERROR] Error recreating: $($missing.Name) - $_" -Color Red -ToScreen
+            # Print compact error line with status at end
+            Write-Host "  ➕ " -NoNewline
+            Write-Host "$($missing.Name.PadRight(35)) " -NoNewline -ForegroundColor White
+            Write-Host "$("[Recreate]".PadRight(20)) " -NoNewline -ForegroundColor Red
+            Write-Host "IN: " -NoNewline -ForegroundColor DarkGray
+            Write-Host "$($missing.Folder.PadRight(61)) " -NoNewline -ForegroundColor Gray
+            Write-Host "❌" -ForegroundColor Red
+            
             Write_Log "Recreate failed: $($missing.Name) - $_"
             $ErrorCount.Value++
         }
@@ -900,14 +979,12 @@ function Execute_ShortcutRecreations {
 
 function Execute_FolderDeletes {
     param(
-        [System.Collections.Generic.List[hashtable]]$EmptyFoldersToDelete,
+        $EmptyFoldersToDelete,
         [ref]$SuccessCount,
         [ref]$ErrorCount
     )
     
     if ($EmptyFoldersToDelete.Count -eq 0) { return }
-    
-    Write_Log "Deleting $($EmptyFoldersToDelete.Count) empty folders..." -Color Magenta -ToScreen
     
     foreach ($folder in $EmptyFoldersToDelete) {
         try {
@@ -915,15 +992,35 @@ function Execute_FolderDeletes {
             $items = Get-ChildItem -Path $folder.Path -Force -ErrorAction SilentlyContinue
             if ($null -eq $items -or $items.Count -eq 0) {
                 Remove-Item -Path $folder.Path -Force -ErrorAction Stop
-                Write_Log "  [OK] Deleted empty folder: $($folder.DisplayFolder)" -Color Magenta -ToScreen
+                
+                # Print compact success line with deletion emoji, alignment, and status at end
+                Write-Host "  🗑️ " -NoNewline -ForegroundColor Magenta
+                Write-Host "$($folder.DisplayFolder.PadRight(35)) " -NoNewline -ForegroundColor Magenta
+                Write-Host "$("[Delete]".PadRight(20)) " -NoNewline -ForegroundColor Magenta
+                Write-Host " ".PadRight(62) -NoNewline
+                Write-Host "✅" -ForegroundColor Green
+                
                 Write_Log "Deleted empty folder: $($folder.DisplayFolder)"
                 $SuccessCount.Value++
             } else {
-                Write_Log "  [SKIP] Folder not empty: $($folder.DisplayFolder)" -Color Yellow -ToScreen
+                # Print compact skip line with delete emoji in first column, warning in last
+                Write-Host "  🗑️  " -NoNewline -ForegroundColor Magenta
+                Write-Host "$($folder.DisplayFolder.PadRight(35)) " -NoNewline -ForegroundColor Magenta
+                Write-Host "$("[Delete]".PadRight(20)) " -NoNewline -ForegroundColor Yellow
+                Write-Host " ".PadRight(62) -NoNewline
+                Write-Host "⚠️" -ForegroundColor Yellow
+                
                 Write_Log "Skipped deletion (folder not empty): $($folder.DisplayFolder)"
             }
         } catch {
-            Write_Log "  [ERROR] Error deleting folder: $($folder.DisplayFolder) - $_" -Color Red -ToScreen
+            # Print compact error line with delete emoji in first column, error in last
+            Write-Host "  🗑️  " -NoNewline -ForegroundColor Magenta
+            Write-Host "$($folder.DisplayFolder.PadRight(35)) " -NoNewline -ForegroundColor Magenta
+            Write-Host "$("[Delete]".PadRight(20)) " -NoNewline -ForegroundColor Red
+            Write-Host " ".PadRight(62) -NoNewline
+            Write-Host "❌" -ForegroundColor Red
+            
+            Write_Log "Error deleting folder: $($folder.DisplayFolder) - $_"
             $ErrorCount.Value++
         }
     }
@@ -1018,8 +1115,8 @@ function Invoke_EnforceMode {
         -Processed $scanResults.Processed `
         -ShortcutDetailsMap $configData.ShortcutDetailsMap
     
-    # Detect empty folders
-    $emptyFoldersToDelete = Detect_EmptyFolders -TargetPath $target -ConfigRaw $configRaw
+    # Detect empty folders (pass planned moves to detect folders that will become empty)
+    $emptyFoldersToDelete = Detect_EmptyFolders -TargetPath $target -ConfigRaw $configRaw -PlannedMoves $scanResults.PlannedMoves
     
     # Check if there are any changes
     $hasChanges = ($scanResults.PlannedMoves.Count -gt 0 -or $scanResults.PlannedDeletes.Count -gt 0 -or `
@@ -1049,7 +1146,6 @@ function Invoke_EnforceMode {
     Write-Host ("="*70) -ForegroundColor Green
     Write-Host " EXECUTION" -ForegroundColor Green
     Write-Host ("="*70) -ForegroundColor Green
-    Write-Host ""
 
     $successCount = 0
     $errorCount = 0
@@ -1063,9 +1159,11 @@ function Invoke_EnforceMode {
         -TargetPath $target `
         -SuccessCount ([ref]$successCount) -ErrorCount ([ref]$errorCount)
     
-    # Execute folder deletes
-    Execute_FolderDeletes -EmptyFoldersToDelete $emptyFoldersToDelete `
+    # Execute folder deletes (use @() to prevent unwrapping single-item collections)
+    Execute_FolderDeletes -EmptyFoldersToDelete @($emptyFoldersToDelete) `
         -SuccessCount ([ref]$successCount) -ErrorCount ([ref]$errorCount)
+    
+    Write-Host ""
     
     # Summary
     Write-Host ""
