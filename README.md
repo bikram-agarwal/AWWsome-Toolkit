@@ -25,15 +25,23 @@ Automated Start Menu backup / restore, with scheduling.
 - **Script**: [`start_menu_manager.ps1`](windows/start_menu_manager.ps1)
 - **Guide**: [`start_menu_manager.md`](windows/start_menu_manager.md)
 - **What it does**:
-  - 💾 **SAVE mode**: Scans Start Menu folder and generates configuration file
-  - 🛡️ **ENFORCE mode**: Organizes shortcuts based on configuration
+  - 📖 **READ mode**: Display current config structure
+  - 💾 **SAVE mode**: Scan Start Menu and generate configuration file
+  - 🛡️ **ENFORCE mode**: Organize shortcuts based on configuration
 - **Features**:
-  - Scheduled task support for daily automation
-  - Quarantines unknown shortcuts to "Unsorted" folder
-  - Handles different app versions (e.g., Chrome 120, Chrome 121) and architecture variants (32-bit/64-bit) intelligently
-  - Dry-run preview before making changes
-  - Comprehensive logging with timestamps
-- **Use case**: Keep Start Menu organized automatically, especially useful after software updates or new installations
+  - 🖱️ Interactive menu system for easy mode selection
+  - ⚡ Parallel processing (PowerShell 7+) for 2-3x faster scanning
+  - 🎭 Automatic duplicate detection and removal
+  - ➕ Missing shortcut recreation with original properties
+  - 🥅 Quarantines unknown shortcuts to "Unsorted" with smart numbering
+  - 🏃 Auto-elevation when admin privileges needed
+  - 📅 Scheduled task support for daily automation
+  - 👁️ Dry-run preview before making changes
+  - 📊 Comprehensive logging with timestamps
+- **Smart Features**:
+  - Handles app version updates (e.g., Chrome 120 → Chrome 121)
+  - Manages architecture variants (32-bit/64-bit) as separate entries
+- **Use case**: Permanently maintain Start Menu organization, especially useful after software updates or new installations
 
 ### Windows Cleanup
 Comprehensive system cleanup tool and documentation for reclaiming disk space safely.
