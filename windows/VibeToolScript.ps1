@@ -85,16 +85,30 @@ function Enable-Feature($Name) {
     $ids = $FeatureMap[$Name]
     Write-Host "Enabling $Name..." -ForegroundColor Cyan
     
+    $successCount = 0
+    $failCount = 0
+    
     foreach ($id in $ids) {
         $result = & $vivetool /enable /id:$id 2>&1
         if ($LASTEXITCODE -eq 0) {
             Write-Host "  Feature ID $id enabled" -ForegroundColor Green
+            $successCount++
         } else {
             Write-Host "  Feature ID $id failed: $result" -ForegroundColor Red
+            $failCount++
         }
     }
     
-    Write-Log $Name $ids "Enabled" "Success"
+    # Determine actual result status
+    $resultStatus = if ($failCount -eq 0) {
+        "Success"
+    } elseif ($successCount -eq 0) {
+        "Failed"
+    } else {
+        "Partial ($successCount/$($ids.Count) succeeded)"
+    }
+    
+    Write-Log $Name $ids "Enabled" $resultStatus
     Write-Host "Restart required for changes to take effect" -ForegroundColor Yellow
 }
 
@@ -108,16 +122,30 @@ function Disable-Feature($Name) {
     $ids = $FeatureMap[$Name]
     Write-Host "Disabling $Name..." -ForegroundColor Cyan
     
+    $successCount = 0
+    $failCount = 0
+    
     foreach ($id in $ids) {
         $result = & $vivetool /disable /id:$id 2>&1
         if ($LASTEXITCODE -eq 0) {
             Write-Host "  Feature ID $id disabled" -ForegroundColor Green
+            $successCount++
         } else {
             Write-Host "  Feature ID $id failed: $result" -ForegroundColor Red
+            $failCount++
         }
     }
     
-    Write-Log $Name $ids "Disabled" "Success"
+    # Determine actual result status
+    $resultStatus = if ($failCount -eq 0) {
+        "Success"
+    } elseif ($successCount -eq 0) {
+        "Failed"
+    } else {
+        "Partial ($successCount/$($ids.Count) succeeded)"
+    }
+    
+    Write-Log $Name $ids "Disabled" $resultStatus
     Write-Host "Restart required for changes to take effect" -ForegroundColor Yellow
 }
 
@@ -273,4 +301,5 @@ while ($true) {
             Start-Sleep -Seconds 1
         }
     }
+}
 }
