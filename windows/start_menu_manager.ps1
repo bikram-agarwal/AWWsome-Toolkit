@@ -612,7 +612,9 @@ function Migrate_UserShortcutsToSystemWide {
     foreach ($shortcut in $userShortcuts) {
         try {
             # Calculate relative path from user start menu
-            $relativePath = $shortcut.FullName.Substring($userStartMenuPath.Length).TrimStart('\')
+            # Ensure base path ends with backslash for correct substring extraction
+            $basePath = $userStartMenuPath.TrimEnd('\') + '\'
+            $relativePath = $shortcut.FullName.Substring($basePath.Length)
             
             # Determine destination in system-wide location
             $destPath = Join-Path $target $relativePath
@@ -671,7 +673,9 @@ function Migrate_UserShortcutsToSystemWide {
             $items = Get-ChildItem -Path $folder.FullName -Force -ErrorAction SilentlyContinue
             if ($null -eq $items -or $items.Count -eq 0) {
                 Remove-Item -Path $folder.FullName -Force -ErrorAction Stop
-                $relativePath = $folder.FullName.Substring($userStartMenuPath.Length).TrimStart('\')
+                # Ensure base path ends with backslash for correct substring extraction
+                $basePath = $userStartMenuPath.TrimEnd('\') + '\'
+                $relativePath = $folder.FullName.Substring($basePath.Length)
                 Write-Host "  🗑️  Removed empty folder: $relativePath" -ForegroundColor Magenta
                 Write_Log "Removed empty user folder: $relativePath"
                 $cleanedCount++

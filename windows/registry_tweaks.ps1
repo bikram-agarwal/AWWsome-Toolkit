@@ -66,7 +66,11 @@ $selected = @()
 if ($selection -match '^[Aa](ll)?$') {
     $selected = 0..($tweaks.Count - 1)
 } else {
-    $selected = $selection -split ',' | ForEach-Object { [int]$_.Trim() - 1 } | Where-Object { $_ -ge 0 -and $_ -lt $tweaks.Count }
+    # Use safe conversion (-as [int]) to handle invalid input gracefully
+    $selected = $selection -split ',' | ForEach-Object { 
+        $num = $_.Trim() -as [int]
+        if ($null -ne $num) { $num - 1 } else { $null }
+    } | Where-Object { $null -ne $_ -and $_ -ge 0 -and $_ -lt $tweaks.Count }
 }
 
 if ($selected.Count -eq 0) {
