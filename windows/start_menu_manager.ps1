@@ -594,7 +594,7 @@ function Migrate_UserShortcutsToSystemWide {
     }
     
     # Get all shortcuts from user location (including Startup folder)
-    $userShortcuts = Get-ChildItem -Path $userStartMenuPath -Recurse -Filter *.lnk -File -Force
+    $userShortcuts = @(Get-ChildItem -Path $userStartMenuPath -Recurse -Filter *.lnk -File -Force)
     
     if ($userShortcuts.Count -eq 0) {
         Write_Log "No shortcuts found in user Start Menu" -Color Green -ToScreen
