@@ -50,7 +50,8 @@ $FeatureMap = @{
     "Oct2025Bundle"           = @(57048226)
     "SettingsExperiment58383" = @(58383338)
     "SettingsExperiment59270" = @(59270880)
-    "AdminProtection"         = @(45172197)
+    "AdminProtection"         = @(57048231)
+    "BatteryIconColors"       = @(56328729)
 }
 
 $LogFile = "$env:USERPROFILE\FeatureToggleLog.csv"
@@ -301,5 +302,4 @@ while ($true) {
             Start-Sleep -Seconds 1
         }
     }
-}
 }
