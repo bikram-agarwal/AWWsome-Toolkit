@@ -8,10 +8,11 @@ param(
     [string]$Mode                               # Directly specify mode (skips menu)
 )
 
-$target           = "C:\ProgramData\Microsoft\Windows\Start Menu"
-$configPath       = "D:\OneDrive\Backups\Start Menu\StartMenuConfig.json"
-$logPath          = "D:\OneDrive\Backups\Start Menu\StartMenuManager.log"
-$quarantineFolder = "Programs\Unsorted"         # Relative to $target.
+$target             = "C:\ProgramData\Microsoft\Windows\Start Menu"
+$userStartMenuPath  = "$env:APPDATA\Microsoft\Windows\Start Menu"
+$configPath         = "E:\OneDrive\Backups\Start Menu\StartMenuConfig.json"
+$logPath            = "E:\OneDrive\Backups\Start Menu\StartMenuManager.log"
+$quarantineFolder   = "Programs\Unsorted"         # Relative to $target.
 
 # Script-level variables
 $script:createdFolders = @{}                    # Cache for folder existence checks (used by Ensure_Folder)
@@ -579,6 +580,115 @@ function Format_InColumns {
 
 # ============================================= ENFORCE MODE FUNCTIONS =========================================
 # Functions used only by Invoke_EnforceMode
+
+function Migrate_UserShortcutsToSystemWide {
+    Write-Host ""
+    Write-Host ("="*100) -ForegroundColor Cyan
+    Write-Host " MIGRATING USER SHORTCUTS TO SYSTEM-WIDE LOCATION" -ForegroundColor Cyan
+    Write-Host ("="*100) -ForegroundColor Cyan
+    Write-Host ""
+    
+    if (-not (Test-Path $userStartMenuPath)) {
+        Write_Log "User Start Menu not found at $userStartMenuPath - skipping migration" -Color Gray -ToScreen
+        return
+    }
+    
+    # Get all shortcuts from user location (including Startup folder)
+    $userShortcuts = Get-ChildItem -Path $userStartMenuPath -Recurse -Filter *.lnk -File -Force
+    
+    if ($userShortcuts.Count -eq 0) {
+        Write_Log "No shortcuts found in user Start Menu" -Color Green -ToScreen
+        Write-Host ""
+        return
+    }
+    
+    Write-Host "Found $($userShortcuts.Count) shortcuts in user Start Menu to migrate..." -ForegroundColor Cyan
+    Write-Host ""
+    
+    $successCount = 0
+    $errorCount = 0
+    $skippedCount = 0
+    
+    foreach ($shortcut in $userShortcuts) {
+        try {
+            # Calculate relative path from user start menu
+            $relativePath = $shortcut.FullName.Substring($userStartMenuPath.Length).TrimStart('\')
+            
+            # Determine destination in system-wide location
+            $destPath = Join-Path $target $relativePath
+            $destFolder = Split-Path $destPath -Parent
+            
+            # Ensure destination folder exists
+            Ensure_Folder $destFolder
+            
+            # Check if destination already exists
+            if (Test-Path $destPath) {
+                # Destination exists - delete the user version
+                Remove-Item -Path $shortcut.FullName -Force -ErrorAction Stop
+                Write-Host "  🗑️  $($shortcut.Name.PadRight(50)) [Deleted - already exists in system]" -ForegroundColor Yellow
+                Write_Log "Deleted user shortcut (already exists in system): $($shortcut.Name) - system location: $relativePath"
+                $skippedCount++
+            } else {
+                # Move shortcut to system-wide location
+                Move-Item -Path $shortcut.FullName -Destination $destPath -Force -ErrorAction Stop
+                
+                Write-Host "  ✅ $($shortcut.Name.PadRight(50)) -> $relativePath" -ForegroundColor Green
+                Write_Log "Migrated: $($shortcut.Name) to $relativePath"
+                $successCount++
+            }
+        } catch {
+            Write-Host "  ❌ $($shortcut.Name.PadRight(50)) [Error: $_]" -ForegroundColor Red
+            Write_Log "Migration failed: $($shortcut.Name) - $_"
+            $errorCount++
+        }
+    }
+    
+    Write-Host ""
+    Write-Host ("="*100) -ForegroundColor Cyan
+    Write_Log "Migration complete: $successCount migrated, $skippedCount deleted (already in system), $errorCount errors" -Color $(if ($errorCount -eq 0) { "Green" } else { "Yellow" }) -ToScreen
+    Write-Host ("="*100) -ForegroundColor Cyan
+    Write-Host ""
+    
+    # Clean up empty folders in user location (preserve Programs\Startup folder even if empty)
+    Write-Host "Cleaning up empty folders in user Start Menu..." -ForegroundColor Cyan
+    $userFolders = Get-ChildItem -Path $userStartMenuPath -Directory -Recurse -Force -ErrorAction SilentlyContinue | 
+        Sort-Object { $_.FullName.Split('\').Count } -Descending
+    
+    # Preserve the Programs\Startup folder path
+    $startupFolderPath = Join-Path $userStartMenuPath "Programs\Startup"
+    
+    $cleanedCount = 0
+    foreach ($folder in $userFolders) {
+        try {
+            # Skip the Programs\Startup folder itself (but we moved its contents)
+            if ($folder.FullName -eq $startupFolderPath) {
+                Write-Host "  📌 Preserved empty folder: Programs\Startup" -ForegroundColor Cyan
+                Write_Log "Preserved empty Programs\Startup folder"
+                continue
+            }
+            
+            # Check if folder is empty
+            $items = Get-ChildItem -Path $folder.FullName -Force -ErrorAction SilentlyContinue
+            if ($null -eq $items -or $items.Count -eq 0) {
+                Remove-Item -Path $folder.FullName -Force -ErrorAction Stop
+                $relativePath = $folder.FullName.Substring($userStartMenuPath.Length).TrimStart('\')
+                Write-Host "  🗑️  Removed empty folder: $relativePath" -ForegroundColor Magenta
+                Write_Log "Removed empty user folder: $relativePath"
+                $cleanedCount++
+            }
+        } catch {
+            # Silently ignore errors during cleanup
+            Write_Log "Could not remove folder: $($folder.FullName) - $_"
+        }
+    }
+    
+    if ($cleanedCount -gt 0) {
+        Write_Log "Cleaned up $cleanedCount empty folders from user Start Menu" -Color Green -ToScreen
+    } else {
+        Write_Log "No empty folders to clean up" -Color Gray -ToScreen
+    }
+    Write-Host ""
+}
 
 function Build_ConfigLookupTable {
     param(
@@ -1356,6 +1466,9 @@ function Invoke_ReadMode {
 
 function Invoke_EnforceMode {
     if (-not (Test-Path $configPath)) { throw "Config not found: $configPath" }
+    
+    # First, migrate user shortcuts to system-wide location
+    Migrate_UserShortcutsToSystemWide
     
     $configRaw = Get-Content $configPath -Raw | ConvertFrom-Json
     
