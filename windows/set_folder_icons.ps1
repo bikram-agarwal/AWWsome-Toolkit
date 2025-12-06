@@ -20,10 +20,11 @@
 # ============================================================================
 
 # Target folder path (leave empty to be prompted)
-$TARGET_PATH = "E:\Games"  # Example: "E:\SW" or "C:\PortableApps"
+$TARGET_PATH = "E:\SW"  # Example: "E:\SW" or "C:\PortableApps"
 
 # Mode selection
 $MODE = "set"                # Options: "set" or "remove"
+$INTERACTIVE_SELECT = $true # Set to $true to choose which folders to process from a list
 $CONFIRM_EACH = $true       # Set to $true to confirm each folder before setting icon
 
 # Processing options
@@ -239,6 +240,7 @@ function Main {
         Write-Host "SET custom icons" -ForegroundColor Green
     }
     Write-Host "Recursive: $PROCESS_RECURSIVE" -ForegroundColor White
+    Write-Host "Interactive select: $INTERACTIVE_SELECT" -ForegroundColor White
     Write-Host "Confirm each: $CONFIRM_EACH`n" -ForegroundColor White
     
     # Get all folders
@@ -252,6 +254,60 @@ function Main {
     if ($folders.Count -eq 0) {
         Write-Host "No folders found in the target path." -ForegroundColor Yellow
         return
+    }
+    
+    # Interactive folder selection mode
+    if ($INTERACTIVE_SELECT) {
+        Write-Host "`nAvailable Folders:" -ForegroundColor Cyan
+        Write-Host ("=" * 70)
+        
+        for ($i = 0; $i -lt $folders.Count; $i++) {
+            Write-Host ("{0,3}. {1}" -f ($i + 1), $folders[$i].Name) -ForegroundColor Green
+        }
+        
+        Write-Host ("=" * 70)
+        Write-Host "Total: $($folders.Count) folders" -ForegroundColor White
+        Write-Host ""
+        Write-Host "Enter folder numbers (space-separated), 'all', or 'q' to quit:" -ForegroundColor Yellow
+        $selection = Read-Host "Selection"
+        
+        if ($selection -in 'q', 'Q') {
+            Write-Host "Operation cancelled." -ForegroundColor Yellow
+            return
+        }
+        
+        if ($selection.ToLower() -eq "all") {
+            # Keep all folders
+            Write-Host "Processing all $($folders.Count) folders...`n" -ForegroundColor Cyan
+        }
+        else {
+            # Parse selected indices
+            $indices = $selection -split '\s+' | Where-Object { $_ -match '^\d+$' } | ForEach-Object { [int]$_ }
+            
+            if ($indices.Count -eq 0) {
+                Write-Host "No valid selections. Exiting." -ForegroundColor Yellow
+                return
+            }
+            
+            # Filter folders based on selection
+            $selectedFolders = @()
+            foreach ($idx in $indices) {
+                if ($idx -ge 1 -and $idx -le $folders.Count) {
+                    $selectedFolders += $folders[$idx - 1]
+                }
+                else {
+                    Write-Host "Invalid index: $idx (skipped)" -ForegroundColor Red
+                }
+            }
+            
+            if ($selectedFolders.Count -eq 0) {
+                Write-Host "No valid folders selected. Exiting." -ForegroundColor Yellow
+                return
+            }
+            
+            $folders = $selectedFolders
+            Write-Host "Processing $($folders.Count) selected folder(s)...`n" -ForegroundColor Cyan
+        }
     }
     
     $successCount = 0
