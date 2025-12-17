@@ -1037,7 +1037,8 @@ function Detect_EmptyFolders {
     param(
         [string]$TargetPath,
         [PSCustomObject]$ConfigRaw,
-        $PlannedMoves = @()
+        $PlannedMoves = @(),
+        $PlannedDeletes = @()
     )
     
     # Pre-allocate with estimate (usually only a few empty folders)
@@ -1053,10 +1054,11 @@ function Detect_EmptyFolders {
         }
     }
     
-    # Build sets of folders being emptied/filled by moves
+    # Build sets of folders being emptied/filled by moves and deletes
     $foldersBeingEmptied = @{}
     $foldersReceivingFiles = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     
+    # Track folders losing files due to moves
     foreach ($move in @($PlannedMoves)) {
         # Track source folders losing files
         $sourceFolder = Split-Path $move.Source -Parent
@@ -1068,6 +1070,15 @@ function Detect_EmptyFolders {
         # Track destination folders receiving files
         $destFolder = Split-Path $move.Destination -Parent
         $foldersReceivingFiles.Add($destFolder) | Out-Null
+    }
+    
+    # Track folders losing files due to deletes
+    foreach ($delete in @($PlannedDeletes)) {
+        $sourceFolder = Split-Path $delete.Path -Parent
+        if (-not $foldersBeingEmptied.ContainsKey($sourceFolder)) {
+            $foldersBeingEmptied[$sourceFolder] = @()
+        }
+        $foldersBeingEmptied[$sourceFolder] += $delete.Path
     }
     
     # Scan ALL folders (deepest first for proper deletion order)
@@ -1490,8 +1501,9 @@ function Invoke_EnforceMode {
         -Processed $scanResults.Processed `
         -ShortcutDetailsMap $configData.ShortcutDetailsMap
     
-    # Detect empty folders (pass planned moves to detect folders that will become empty)
-    $emptyFoldersToDelete = Detect_EmptyFolders -TargetPath $target -ConfigRaw $configRaw -PlannedMoves $scanResults.PlannedMoves
+    # Detect empty folders (pass planned moves and deletes to detect folders that will become empty)
+    $emptyFoldersToDelete = Detect_EmptyFolders -TargetPath $target -ConfigRaw $configRaw `
+        -PlannedMoves $scanResults.PlannedMoves -PlannedDeletes $scanResults.PlannedDeletes
     
     # Check if there are any changes
     $hasChanges = ($scanResults.PlannedMoves.Count -gt 0 -or $scanResults.PlannedDeletes.Count -gt 0 -or `
@@ -1551,9 +1563,11 @@ function Invoke_EnforceMode {
             -SuccessCount ([ref]$successCount) -ErrorCount ([ref]$errorCount)
     }
     
-    # 5. Execute folder deletes (use @() to prevent unwrapping single-item collections)
-    Execute_FolderDeletes -EmptyFoldersToDelete @($emptyFoldersToDelete) `
-        -SuccessCount ([ref]$successCount) -ErrorCount ([ref]$errorCount)
+    # 5. Clean up empty folders (use pre-computed list from before execution)
+    if ($emptyFoldersToDelete.Count -gt 0) {
+        Execute_FolderDeletes -EmptyFoldersToDelete @($emptyFoldersToDelete) `
+            -SuccessCount ([ref]$successCount) -ErrorCount ([ref]$errorCount)
+    }
     
     # Summary
     Write-Host ""
