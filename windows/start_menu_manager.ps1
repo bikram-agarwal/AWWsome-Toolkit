@@ -183,225 +183,118 @@ function Format_ActionLine {
 # Functions used only by Invoke_SaveMode
 
 function Scan_StartMenuShortcuts {
-    param(
-        [string]$TargetPath
-    )
-    # Scan Start Menu and build tree structure with shortcut details
+    param([string]$TargetPath)
     
-    Write-Host "Scanning Start Menu to generate config file..." -ForegroundColor Cyan
+    Write-Host "Scanning Start Menu to generate config file..." -ForegroundColor Gray
     Write_Log "Scanning Start Menu: $TargetPath"
     
-    # Check PowerShell version for parallel processing capability
-    $canUseParallel = $PSVersionTable.PSVersion.Major -ge 7
+    $tree = @{}
+    $shortcuts = @(Get-ChildItem -Path $TargetPath -Recurse -Filter *.lnk -File -Force)
     
-    if ($canUseParallel) {
-        # PowerShell 7+: Use parallel processing for faster scanning (especially with 100+ shortcuts)
-        Write-Host "Using parallel processing for faster scanning..." -ForegroundColor Gray
-        
-        $shortcuts = Get-ChildItem -Path $TargetPath -Recurse -Filter *.lnk -File -Force
-        
-        # Thread-safe collection for results
+    # Helper to read shortcut details
+    $ReadShortcut = {
+        param($shell, $item, $targetPath)
+        $rel = $item.DirectoryName.Substring($targetPath.Length).TrimStart('\')
+        $folder = if ($rel) { $rel } else { "Root" }
+        try {
+            $sc = $shell.CreateShortcut($item.FullName)
+            @{ Folder = $folder; Name = $item.Name; TargetPath = $sc.TargetPath; Arguments = $sc.Arguments
+               WorkingDirectory = $sc.WorkingDirectory; IconLocation = $sc.IconLocation; Description = $sc.Description }
+        } catch { @{ Folder = $folder; Name = $item.Name } }
+    }
+    
+    if ($PSVersionTable.PSVersion.Major -ge 7) {
+        # PowerShell 7+: Parallel processing
+        Write-Host "Using parallel processing..." -ForegroundColor Gray
         $results = [System.Collections.Concurrent.ConcurrentBag[hashtable]]::new()
-        
         $shortcuts | ForEach-Object -Parallel {
-            $targetPath = $using:TargetPath
-            $item = $_
-            
-            # Each thread creates its own COM object (COM objects can't be shared)
             $shell = New-Object -ComObject WScript.Shell
-            
             try {
-                $relativePath = $item.DirectoryName.Substring($targetPath.Length).TrimStart('\')
-                $folder = if ([string]::IsNullOrEmpty($relativePath)) { "Root" } else { $relativePath }
-                
-                # Read shortcut details
-                try {
-                    $shortcut = $shell.CreateShortcut($item.FullName)
-                    $details = @{
-                        Folder = $folder
-                        Name = $item.Name
-                        TargetPath = $shortcut.TargetPath
-                        Arguments = $shortcut.Arguments
-                        WorkingDirectory = $shortcut.WorkingDirectory
-                        IconLocation = $shortcut.IconLocation
-                        Description = $shortcut.Description
-                    }
-                } catch {
-                    # Still add the shortcut even if we can't read details
-                    $details = @{
-                        Folder = $folder
-                        Name = $item.Name
-                    }
-                }
-                
-                ($using:results).Add($details)
-            } finally {
-                # Release COM object
-                [System.Runtime.Interopservices.Marshal]::ReleaseComObject($shell) | Out-Null
-            }
+                $rel = $_.DirectoryName.Substring($using:TargetPath.Length).TrimStart('\')
+                $folder = if ($rel) { $rel } else { "Root" }
+                try { $sc = $shell.CreateShortcut($_.FullName)
+                    $r = @{ Folder = $folder; Name = $_.Name; TargetPath = $sc.TargetPath; Arguments = $sc.Arguments
+                            WorkingDirectory = $sc.WorkingDirectory; IconLocation = $sc.IconLocation; Description = $sc.Description }
+                } catch { $r = @{ Folder = $folder; Name = $_.Name } }
+                ($using:results).Add($r)
+            } finally { [System.Runtime.Interopservices.Marshal]::ReleaseComObject($shell) | Out-Null }
         } -ThrottleLimit 5
-        
-        # Build tree from results
-        $tree = @{}
-        foreach ($result in $results) {
-            $folder = $result.Folder
-            $name = $result.Name
-            
-            if (-not $tree.ContainsKey($folder)) {
-                $tree[$folder] = @{}
-            }
-            
-            # Extract shortcut properties (everything except Folder and Name)
-            $properties = @{}
-            foreach ($key in $result.Keys) {
-                if ($key -notin @('Folder', 'Name')) {
-                    $properties[$key] = $result[$key]
-                }
-            }
-            $tree[$folder][$name] = $properties
+        foreach ($r in $results) {
+            if (-not $tree[$r.Folder]) { $tree[$r.Folder] = @{} }
+            $props = @{}; $r.Keys | Where-Object { $_ -notin 'Folder','Name' } | ForEach-Object { $props[$_] = $r[$_] }
+            $tree[$r.Folder][$r.Name] = $props
         }
     } else {
-        # PowerShell 5.x: Use traditional sequential processing
+        # PowerShell 5.x: Sequential
         $shell = New-Object -ComObject WScript.Shell
-        $tree = @{}
-        
-        Get-ChildItem -Path $TargetPath -Recurse -Filter *.lnk -File -Force | ForEach-Object {
-            $relativePath = $_.DirectoryName.Substring($TargetPath.Length).TrimStart('\')
-            $folder = if ([string]::IsNullOrEmpty($relativePath)) { "Root" } else { $relativePath }
-
-            if (-not $tree.ContainsKey($folder)) {
-                $tree[$folder] = @{}
-            }
-            
-            # Read shortcut details
-            try {
-                $shortcut = $shell.CreateShortcut($_.FullName)
-                $tree[$folder][$_.Name] = @{
-                    TargetPath = $shortcut.TargetPath
-                    Arguments = $shortcut.Arguments
-                    WorkingDirectory = $shortcut.WorkingDirectory
-                    IconLocation = $shortcut.IconLocation
-                    Description = $shortcut.Description
-                }
-            } catch {
-                Write_Log "Warning: Could not read shortcut details for $($_.Name): $_"
-                # Still add the shortcut even if we can't read details
-                $tree[$folder][$_.Name] = @{}
-            }
+        foreach ($item in $shortcuts) {
+            $r = & $ReadShortcut $shell $item $TargetPath
+            if (-not $tree[$r.Folder]) { $tree[$r.Folder] = @{} }
+            $props = @{}; $r.Keys | Where-Object { $_ -notin 'Folder','Name' } | ForEach-Object { $props[$_] = $r[$_] }
+            $tree[$r.Folder][$item.Name] = $props
         }
-        
-        # Release COM object
         [System.Runtime.Interopservices.Marshal]::ReleaseComObject($shell) | Out-Null
     }
     
-    # Add important system folders even if they have no shortcuts
-    # This ensures they're preserved in ENFORCE mode
-    $systemFolders = @("Programs\Startup")
-    foreach ($sysFolder in $systemFolders) {
-        if (-not $tree.ContainsKey($sysFolder)) {
-            # Check if the folder actually exists before adding
-            $sysFolderPath = Join-Path $TargetPath $sysFolder
-            if (Test-Path $sysFolderPath) {
-                $tree[$sysFolder] = @{}
-                Write_Log "Added empty system folder to config: $sysFolder"
-            }
-        }
+    # Add preserved system folders
+    $startupPath = Join-Path $TargetPath "Programs\Startup"
+    if (-not $tree["Programs\Startup"] -and (Test-Path $startupPath)) {
+        $tree["Programs\Startup"] = @{}; Write_Log "Added empty system folder: Programs\Startup"
     }
     
-    # Sort folders alphabetically, and sort shortcuts within each folder
-    # Use [ordered] to preserve insertion order when converting to JSON
-    $sortedTree = [ordered]@{}
+    # Sort and return
+    $sorted = [ordered]@{}
     foreach ($folder in ($tree.Keys | Sort-Object)) {
-        $sortedTree[$folder] = [ordered]@{}
-        foreach ($shortcutName in ($tree[$folder].Keys | Sort-Object)) {
-            # Sort properties within each shortcut alphabetically
-            $shortcutDetails = $tree[$folder][$shortcutName]
-            $sortedDetails = [ordered]@{}
-            foreach ($propName in ($shortcutDetails.Keys | Sort-Object)) {
-                $sortedDetails[$propName] = $shortcutDetails[$propName]
+        $sorted[$folder] = [ordered]@{}
+        foreach ($shortcut in ($tree[$folder].Keys | Sort-Object)) {
+            $sorted[$folder][$shortcut] = [ordered]@{}
+            foreach ($prop in ($tree[$folder][$shortcut].Keys | Sort-Object)) {
+                $sorted[$folder][$shortcut][$prop] = $tree[$folder][$shortcut][$prop]
             }
-            $sortedTree[$folder][$shortcutName] = $sortedDetails
         }
     }
-    
-    return $sortedTree
+    return $sorted
 }
 
 function Calculate_ConfigDiff {
-    param(
-        [PSCustomObject]$OldConfig,
-        [PSCustomObject]$NewConfig
-    )
-    # Compare old and new configs, display differences, return whether changes were found
+    param([PSCustomObject]$OldConfig, [PSCustomObject]$NewConfig)
     
-    Write-Host ""
-    Write-Host ("="*100) -ForegroundColor Magenta
+    Write-Host "`n$("="*100)" -ForegroundColor Magenta
     Write-Host " CHANGES FROM PREVIOUS CONFIG" -ForegroundColor Magenta
-    Write-Host ("="*100) -ForegroundColor Magenta
-    Write-Host ""
+    Write-Host "$("="*100)`n" -ForegroundColor Magenta
     Write_Log "`n========== CHANGES FROM PREVIOUS CONFIG =========="
     
     $changesFound = $false
-    
-    # Check for new/removed folders
     $oldFolders = @($OldConfig.PSObject.Properties.Name)
     $newFolders = @($NewConfig.PSObject.Properties.Name)
     
-    $addedFolders = $newFolders | Where-Object { $_ -notin $oldFolders }
-    $removedFolders = $oldFolders | Where-Object { $_ -notin $newFolders }
-    
-    if ($addedFolders.Count -gt 0) {
-        $changesFound = $true
-        Write_Log "NEW FOLDERS ($($addedFolders.Count)):" -Color Green -ToScreen
-        foreach ($folder in ($addedFolders | Sort-Object)) {
-            Write_Log "  + $folder" -Color Green -ToScreen
-        }
-        Write-Host ""
-    }
-    
-    if ($removedFolders.Count -gt 0) {
-        $changesFound = $true
-        Write_Log "REMOVED FOLDERS ($($removedFolders.Count)):" -Color Red -ToScreen
-        foreach ($folder in ($removedFolders | Sort-Object)) {
-            Write_Log "  - $folder" -Color Red -ToScreen
-        }
-        Write-Host ""
-    }
-    
-    # Check for changed shortcuts in common folders
-    $commonFolders = $newFolders | Where-Object { $_ -in $oldFolders }
-    foreach ($folder in ($commonFolders | Sort-Object)) {
-        $oldShortcuts = @($OldConfig.$folder.PSObject.Properties.Name)
-        $newShortcuts = @($NewConfig.$folder.PSObject.Properties.Name)
-        
-        $added = $newShortcuts | Where-Object { $_ -notin $oldShortcuts }
-        $removed = $oldShortcuts | Where-Object { $_ -notin $newShortcuts }
-        
-        if ($added.Count -gt 0 -or $removed.Count -gt 0) {
+    # Show added/removed folders
+    @{Items = @($newFolders | Where-Object { $_ -notin $oldFolders }); Label = "NEW FOLDERS"; Prefix = "+"; Color = "Green"},
+    @{Items = @($oldFolders | Where-Object { $_ -notin $newFolders }); Label = "REMOVED FOLDERS"; Prefix = "-"; Color = "Red"} | ForEach-Object {
+        if ($_.Items.Count -gt 0) {
             $changesFound = $true
-            Write-Host "$folder" -ForegroundColor Yellow -NoNewline
-            Write-Host " (+$($added.Count) / -$($removed.Count))" -ForegroundColor Gray
-            Write_Log "$folder (+$($added.Count) / -$($removed.Count))"
-            
-            foreach ($sc in ($added | Sort-Object)) {
-                Write_Log "      + $sc" -Color Green -ToScreen
-            }
-            foreach ($sc in ($removed | Sort-Object)) {
-                Write_Log "      - $sc" -Color Red -ToScreen
-            }
+            Write_Log "$($_.Label) ($($_.Items.Count)):" -Color $_.Color -ToScreen
+            $_.Items | Sort-Object | ForEach-Object { Write_Log "  $($args[0].Prefix) $_" -Color $args[0].Color -ToScreen } -ArgumentList $_
             Write-Host ""
         }
     }
     
-    if (-not $changesFound) {
-        Write_Log "No changes detected." -Color Gray -ToScreen
-        Write-Host ""
+    # Show changed shortcuts in common folders
+    $newFolders | Where-Object { $_ -in $oldFolders } | Sort-Object | ForEach-Object {
+        $folder = $_; $old = @($OldConfig.$folder.PSObject.Properties.Name); $new = @($NewConfig.$folder.PSObject.Properties.Name)
+        $added = @($new | Where-Object { $_ -notin $old }); $removed = @($old | Where-Object { $_ -notin $new })
+        if ($added.Count -gt 0 -or $removed.Count -gt 0) {
+            $changesFound = $true
+            Write-Host "$folder" -ForegroundColor Yellow -NoNewline; Write-Host " (+$($added.Count) / -$($removed.Count))" -ForegroundColor Gray
+            Write_Log "$folder (+$($added.Count) / -$($removed.Count))"
+            $added | Sort-Object | ForEach-Object { Write_Log "      + $_" -Color Green -ToScreen }
+            $removed | Sort-Object | ForEach-Object { Write_Log "      - $_" -Color Red -ToScreen }
+            Write-Host ""
+        }
     }
     
-    Write-Host ("="*100) -ForegroundColor Magenta
-    Write-Host ""
-    Write_Log "=================================================="
-    
+    if (-not $changesFound) { Write_Log "No changes detected." -Color Gray -ToScreen; Write-Host "" }
+    Write-Host ("="*100) -ForegroundColor Magenta; Write-Host ""; Write_Log "=================================================="
     return $changesFound
 }
 
@@ -415,7 +308,7 @@ function Save_ConfigFile {
     $folderCount = $ConfigTree.Keys.Count
     $shortcutCount = ($ConfigTree.Values | ForEach-Object { $_.Keys.Count } | Measure-Object -Sum).Sum
     
-    Write-Host "Saving config..." -ForegroundColor Cyan
+    Write-Host "Saving config..." -ForegroundColor Gray
     
     # Use built-in ConvertTo-Json (much faster than manual building)
     # Note: Sorting is already done in Scan_StartMenuShortcuts via [ordered] hashtables
@@ -431,23 +324,30 @@ function Save_ConfigFile {
 function Create_StartMenuBackup {
     param(
         [string]$TargetPath,
-        [string]$ConfigPath
+        [string]$BackupFolder,
+        [string]$Label = "StartMenu"  # "System", "User", or custom label
     )
     # Create zip backup of Start Menu folder (including empty folders)
     
-    Write-Host "`nCreating backup..." -ForegroundColor Cyan
-    $backupPath = Join-Path (Split-Path $ConfigPath -Parent) "StartMenuBackup_$(Get-Date -Format 'yyyyMMdd_HHmmss').zip"
+    if (-not (Test-Path $TargetPath)) {
+        Write_Log "Backup skipped - path does not exist: $TargetPath"
+        return $null
+    }
+    
+    Write-Host "Creating $Label backup..." -ForegroundColor Gray
+    $backupPath = Join-Path $BackupFolder "$($Label)Backup_$(Get-Date -Format 'yyyyMMdd_HHmmss').zip"
     
     try {
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         if (Test-Path $backupPath) { Remove-Item $backupPath -Force }
         [System.IO.Compression.ZipFile]::CreateFromDirectory($TargetPath, $backupPath, [System.IO.Compression.CompressionLevel]::Optimal, $true)
-        Write-Host "[OK] Backup created successfully!" -ForegroundColor Green
-        Write-Host "  Location: $backupPath" -ForegroundColor Gray
+        Write-Host "  ✅ Backup: $backupPath" -ForegroundColor Green
         Write_Log "Backup created: $backupPath"
+        return $backupPath
     } catch {
-        Write-Host "[ERROR] Failed to create backup: $_" -ForegroundColor Red
+        Write-Host "  ❌ Backup failed: $_" -ForegroundColor Red
         Write_Log "Failed to create backup: $_"
+        return $null
     }
 }
 
@@ -581,116 +481,103 @@ function Format_InColumns {
 # ============================================= ENFORCE MODE FUNCTIONS =========================================
 # Functions used only by Invoke_EnforceMode
 
-function Migrate_UserShortcutsToSystemWide {
-    Write-Host ""
-    Write-Host ("="*100) -ForegroundColor Cyan
-    Write-Host " MIGRATING USER SHORTCUTS TO SYSTEM-WIDE LOCATION" -ForegroundColor Cyan
-    Write-Host ("="*100) -ForegroundColor Cyan
-    Write-Host ""
+function Scan_UserShortcutsForMigration {
+    # Scan user Start Menu and build list of planned migrations (preview only, no file operations)
+    
+    $plannedMigrations = [System.Collections.Generic.List[hashtable]]::new()
     
     if (-not (Test-Path $userStartMenuPath)) {
-        Write_Log "User Start Menu not found at $userStartMenuPath - skipping migration" -Color Gray -ToScreen
-        return
+        return $plannedMigrations
     }
     
     # Get all shortcuts from user location (including Startup folder)
     $userShortcuts = @(Get-ChildItem -Path $userStartMenuPath -Recurse -Filter *.lnk -File -Force)
     
     if ($userShortcuts.Count -eq 0) {
-        Write_Log "No shortcuts found in user Start Menu" -Color Green -ToScreen
-        Write-Host ""
-        return
+        return $plannedMigrations
     }
-    
-    Write-Host "Found $($userShortcuts.Count) shortcuts in user Start Menu to migrate..." -ForegroundColor Cyan
-    Write-Host ""
-    
-    $successCount = 0
-    $errorCount = 0
-    $skippedCount = 0
     
     foreach ($shortcut in $userShortcuts) {
+        # Calculate relative path from user start menu
+        $basePath = $userStartMenuPath.TrimEnd('\') + '\'
+        $relativePath = $shortcut.FullName.Substring($basePath.Length)
+        
+        # Determine destination in system-wide location
+        $destPath = Join-Path $target $relativePath
+        
+        # Check if destination already exists
+        $alreadyExists = Test-Path $destPath
+        
+        $plannedMigrations.Add(@{
+            Name = $shortcut.Name
+            Source = $shortcut.FullName
+            Destination = $destPath
+            RelativePath = $relativePath
+            AlreadyExists = $alreadyExists
+            Type = if ($alreadyExists) { "Delete" } else { "Migrate" }
+        })
+    }
+    
+    return $plannedMigrations
+}
+
+function Execute_UserMigrations {
+    param($PlannedMigrations, [ref]$SuccessCount, [ref]$ErrorCount)
+    
+    if ($PlannedMigrations.Count -eq 0) { return }
+    
+    Write-Host ""
+    Write-Host ("="*70) -ForegroundColor Cyan
+    Write-Host " USER START MENU CHANGES" -ForegroundColor Cyan
+    Write-Host ("="*70) -ForegroundColor Cyan
+    
+    # Migrate shortcuts
+    Write-Host "`nMigrating shortcuts to system-wide location..." -ForegroundColor Gray
+    $migrateCount = 0; $deleteCount = 0
+    foreach ($m in $PlannedMigrations) {
         try {
-            # Calculate relative path from user start menu
-            # Ensure base path ends with backslash for correct substring extraction
-            $basePath = $userStartMenuPath.TrimEnd('\') + '\'
-            $relativePath = $shortcut.FullName.Substring($basePath.Length)
-            
-            # Determine destination in system-wide location
-            $destPath = Join-Path $target $relativePath
-            $destFolder = Split-Path $destPath -Parent
-            
-            # Ensure destination folder exists
-            Ensure_Folder $destFolder
-            
-            # Check if destination already exists
-            if (Test-Path $destPath) {
-                # Destination exists - delete the user version
-                Remove-Item -Path $shortcut.FullName -Force -ErrorAction Stop
-                Write-Host "  🗑️  $($shortcut.Name.PadRight(50)) [Deleted - already exists in system]" -ForegroundColor Yellow
-                Write_Log "Deleted user shortcut (already exists in system): $($shortcut.Name) - system location: $relativePath"
-                $skippedCount++
+            Ensure_Folder (Split-Path $m.Destination -Parent)
+            if ($m.AlreadyExists) {
+                Remove-Item -Path $m.Source -Force -ErrorAction Stop
+                Write-Host "  🗑️  $($m.Name.PadRight(40)) [Already exists in system]" -ForegroundColor Magenta
+                Write_Log "Deleted user shortcut: $($m.Name) - exists at $($m.RelativePath)"; $deleteCount++
             } else {
-                # Move shortcut to system-wide location
-                Move-Item -Path $shortcut.FullName -Destination $destPath -Force -ErrorAction Stop
-                
-                Write-Host "  ✅ $($shortcut.Name.PadRight(50)) -> $relativePath" -ForegroundColor Green
-                Write_Log "Migrated: $($shortcut.Name) to $relativePath"
-                $successCount++
+                Move-Item -Path $m.Source -Destination $m.Destination -Force -ErrorAction Stop
+                Write-Host "  ✅ $($m.Name.PadRight(40)) -> $($m.RelativePath)" -ForegroundColor Green
+                Write_Log "Migrated: $($m.Name) to $($m.RelativePath)"; $migrateCount++
             }
+            $SuccessCount.Value++
         } catch {
-            Write-Host "  ❌ $($shortcut.Name.PadRight(50)) [Error: $_]" -ForegroundColor Red
-            Write_Log "Migration failed: $($shortcut.Name) - $_"
-            $errorCount++
+            Write-Host "  ❌ $($m.Name.PadRight(40)) [Error: $_]" -ForegroundColor Red
+            Write_Log "Migration failed: $($m.Name) - $_"; $ErrorCount.Value++
         }
     }
+    Write-Host "  Migrated: $migrateCount, Deleted (duplicates): $deleteCount" -ForegroundColor Gray
     
-    Write-Host ""
-    Write-Host ("="*100) -ForegroundColor Cyan
-    Write_Log "Migration complete: $successCount migrated, $skippedCount deleted (already in system), $errorCount errors" -Color $(if ($errorCount -eq 0) { "Green" } else { "Yellow" }) -ToScreen
-    Write-Host ("="*100) -ForegroundColor Cyan
-    Write-Host ""
-    
-    # Clean up empty folders in user location (preserve Programs\Startup folder even if empty)
-    Write-Host "Cleaning up empty folders in user Start Menu..." -ForegroundColor Cyan
-    $userFolders = Get-ChildItem -Path $userStartMenuPath -Directory -Recurse -Force -ErrorAction SilentlyContinue | 
-        Sort-Object { $_.FullName.Split('\').Count } -Descending
-    
-    # Preserve the Programs\Startup folder path
-    $startupFolderPath = Join-Path $userStartMenuPath "Programs\Startup"
-    
+    # Clean up empty user folders (preserve Programs\Startup)
+    Write-Host "`nCleaning up empty folders..." -ForegroundColor Gray
+    $startupPath = Join-Path $userStartMenuPath "Programs\Startup"
+    $basePath = $userStartMenuPath.TrimEnd('\') + '\'
     $cleanedCount = 0
-    foreach ($folder in $userFolders) {
-        try {
-            # Skip the Programs\Startup folder itself (but we moved its contents)
-            if ($folder.FullName -eq $startupFolderPath) {
-                Write-Host "  📌 Preserved empty folder: Programs\Startup" -ForegroundColor Cyan
-                Write_Log "Preserved empty Programs\Startup folder"
-                continue
-            }
-            
-            # Check if folder is empty
-            $items = Get-ChildItem -Path $folder.FullName -Force -ErrorAction SilentlyContinue
-            if ($null -eq $items -or $items.Count -eq 0) {
-                Remove-Item -Path $folder.FullName -Force -ErrorAction Stop
-                # Ensure base path ends with backslash for correct substring extraction
-                $basePath = $userStartMenuPath.TrimEnd('\') + '\'
-                $relativePath = $folder.FullName.Substring($basePath.Length)
-                Write-Host "  🗑️  Removed empty folder: $relativePath" -ForegroundColor Magenta
-                Write_Log "Removed empty user folder: $relativePath"
-                $cleanedCount++
-            }
-        } catch {
-            # Silently ignore errors during cleanup
-            Write_Log "Could not remove folder: $($folder.FullName) - $_"
+    $preservedShown = $false
+    
+    Get-ChildItem -Path $userStartMenuPath -Directory -Recurse -Force -ErrorAction SilentlyContinue | 
+        Sort-Object { $_.FullName.Split('\').Count } -Descending | ForEach-Object {
+        if ($_.FullName -eq $startupPath) {
+            if (-not $preservedShown) { Write-Host "  📌 Preserved: Programs\Startup" -ForegroundColor Yellow; $preservedShown = $true }
+            return
+        }
+        $items = @(Get-ChildItem -Path $_.FullName -Force -ErrorAction SilentlyContinue)
+        if ($items.Count -eq 0) {
+            try {
+                Remove-Item -Path $_.FullName -Force -ErrorAction Stop
+                $rel = $_.FullName.Substring($basePath.Length)
+                Write-Host "  🗑️  Removed: $rel" -ForegroundColor Magenta
+                Write_Log "Removed empty user folder: $rel"; $cleanedCount++
+            } catch { Write_Log "Could not remove: $($_.FullName) - $_" }
         }
     }
-    
-    if ($cleanedCount -gt 0) {
-        Write_Log "Cleaned up $cleanedCount empty folders from user Start Menu" -Color Green -ToScreen
-    } else {
-        Write_Log "No empty folders to clean up" -Color Gray -ToScreen
-    }
+    if ($cleanedCount -eq 0) { Write-Host "  (none)" -ForegroundColor Gray }
     Write-Host ""
 }
 
@@ -754,659 +641,385 @@ function Build_ConfigLookupTable {
 }
 
 function Scan_AndOrganizeShortcuts {
-    param(
-        [string]$TargetPath,
-        [hashtable]$AllConfigShortcuts,
-        [hashtable]$ExpectedMap,
-        [string]$QuarantineFolder
-    )
+    param([string]$TargetPath, [hashtable]$AllConfigShortcuts, [hashtable]$ExpectedMap, [string]$QuarantineFolder)
     
-    Write-Host "Scanning shortcuts at $TargetPath..." -ForegroundColor Cyan
+    Write-Host "Scanning shortcuts at $TargetPath..." -ForegroundColor Gray
     $allShortcuts = @(Get-ChildItem -Path $TargetPath -Recurse -Filter *.lnk -File -Force)
     
-    $actualIndex = @{}
-    $processed = @{}
-    # Pre-allocate list capacity for better performance (estimate: ~10% of shortcuts need actions)
+    $actualIndex = @{}; $processed = @{}; $foldersToCheck = @{}; $quarantineCounter = @{}
     $plannedMoves = [System.Collections.Generic.List[hashtable]]::new([Math]::Max(10, $allShortcuts.Count / 10))
     $plannedDeletes = [System.Collections.Generic.List[hashtable]]::new(10)
-    $foldersToCheck = @{}
-    $quarantineCounter = @{}  # Track numbering for unknown duplicate shortcuts
+    $qFolder = Join-Path $TargetPath $QuarantineFolder
 
-    Write-Host "Processing $($allShortcuts.Count) shortcuts..." -ForegroundColor Cyan
+    # Helper: Create numbered quarantine name
+    $GetNumberedName = {
+        param($name, $norm)
+        if (-not $quarantineCounter.ContainsKey($norm)) { $quarantineCounter[$norm] = 0 }
+        $quarantineCounter[$norm]++
+        $base = [System.IO.Path]::GetFileNameWithoutExtension($name)
+        $ext = [System.IO.Path]::GetExtension($name)
+        return "$base ($($quarantineCounter[$norm]))$ext"
+    }
+    
+    # Helper: Add quarantine move
+    $AddQuarantine = {
+        param($file, $newName, $folder)
+        $dest = Join-Path $qFolder $(if ($newName) { $newName } else { $file.Name })
+        $plannedMoves.Add(@{ Type = "Quarantine"; Source = $file.FullName; Destination = $dest; Name = $file.Name
+            NewName = $newName; CurrentFolder = $folder; DestFolder = $QuarantineFolder })
+    }
+    
+    # Helper: Remove conflicting planned move
+    $RemoveConflictingMove = {
+        param($sourcePath, $name)
+        for ($i = $plannedMoves.Count - 1; $i -ge 0; $i--) {
+            if ($plannedMoves[$i].Source -eq $sourcePath) {
+                Write_Log "  -> Removing conflicting planned move for '$name'"
+                $plannedMoves.RemoveAt($i); break
+            }
+        }
+    }
+
+    Write-Host "Processing $($allShortcuts.Count) shortcuts..." -ForegroundColor Gray
 
     foreach ($item in $allShortcuts) {
         $norm = Normalize_ShortcutName $item.Name
-        
-        # Get match key using helper function
-        $matchKey = Get_ShortcutMatchKey -shortcutName $item.Name `
-        -AllConfigShortcuts $AllConfigShortcuts -ExpectedMap $ExpectedMap
-    
-        # For duplicate detection, use the match key
+        $matchKey = Get_ShortcutMatchKey -shortcutName $item.Name -AllConfigShortcuts $AllConfigShortcuts -ExpectedMap $ExpectedMap
         $indexKey = if ($matchKey -and $matchKey -eq $item.Name) { $item.Name } else { $norm }
     
-        # Check for unexpected duplicates
+        # Handle duplicates
         if ($actualIndex.ContainsKey($indexKey)) {
             $existing = $actualIndex[$indexKey]
-            Write_Log "Duplicate found: '$($item.Name)' at $($item.DirectoryName) clashes with '$($existing.Name)' at $($existing.DirectoryName) (both normalize to '$norm')"
-                
-            # Get correct folder from config using helper function
-            $correctFolder = if ($matchKey -and $ExpectedMap.ContainsKey($matchKey)) {
-                $ExpectedMap[$matchKey]
-            } else {
-                $existingKey = Get_ShortcutMatchKey -shortcutName $existing.Name `
-                    -AllConfigShortcuts $AllConfigShortcuts -ExpectedMap $ExpectedMap
-                if ($existingKey -and $ExpectedMap.ContainsKey($existingKey)) { $ExpectedMap[$existingKey] } else { $null }
-            }
+            Write_Log "Duplicate found: '$($item.Name)' at $($item.DirectoryName) clashes with '$($existing.Name)' at $($existing.DirectoryName)"
             
-            # Compare locations
+            $correctFolder = if ($matchKey -and $ExpectedMap.ContainsKey($matchKey)) { $ExpectedMap[$matchKey] }
+                else { $ek = Get_ShortcutMatchKey -shortcutName $existing.Name -AllConfigShortcuts $AllConfigShortcuts -ExpectedMap $ExpectedMap
+                       if ($ek -and $ExpectedMap.ContainsKey($ek)) { $ExpectedMap[$ek] } else { $null } }
+            
             $itemFolder = Get_RelativePath $item.DirectoryName
             $existingFolder = Get_RelativePath $existing.DirectoryName
             
-            # Handle known shortcuts (in config)
             if ($correctFolder) {
-                if ($itemFolder -ne $correctFolder -and $existingFolder -eq $correctFolder) {
-                    # Current item is wrong, existing is correct -> delete current
-                    Write_Log "  -> Deleting duplicate from wrong location: '$($item.Name)' at $itemFolder (correct: $correctFolder)"
-                    $plannedDeletes.Add(@{ Path = $item.FullName; Name = $item.Name; Folder = $itemFolder; CorrectFolder = $correctFolder })
-                    $foldersToCheck[$item.DirectoryName] = $true
-                    continue
-                } elseif ($existingFolder -ne $correctFolder -and $itemFolder -eq $correctFolder) {
-                    # Existing is wrong, current is correct -> remove any planned move for existing, delete it, update index
-                    Write_Log "  -> Deleting duplicate from wrong location: '$($existing.Name)' at $existingFolder (correct: $correctFolder)"
-                    
-                    # Remove any planned move for the existing shortcut
-                    for ($i = $plannedMoves.Count - 1; $i -ge 0; $i--) {
-                        if ($plannedMoves[$i].Source -eq $existing.FullName) {
-                            Write_Log "  -> Removing conflicting planned move for '$($existing.Name)'"
-                            $plannedMoves.RemoveAt($i)
-                            break
-                        }
-                    }
-                    
-                    $plannedDeletes.Add(@{ Path = $existing.FullName; Name = $existing.Name; Folder = $existingFolder; CorrectFolder = $correctFolder })
-                    $foldersToCheck[$existing.DirectoryName] = $true
-                    $actualIndex[$indexKey] = $item
-                } elseif ($itemFolder -eq $correctFolder -and $existingFolder -eq $correctFolder) {
-                    # Both are in correct location -> delete current (keep first found)
-                    Write_Log "  -> Both duplicates in correct location. Deleting second: '$($item.Name)' at $itemFolder"
-                    $plannedDeletes.Add(@{ Path = $item.FullName; Name = $item.Name; Folder = $itemFolder; CorrectFolder = $correctFolder })
-                    $foldersToCheck[$item.DirectoryName] = $true
-                    continue
+                # Known shortcut duplicate handling
+                $itemCorrect = $itemFolder -eq $correctFolder
+                $existingCorrect = $existingFolder -eq $correctFolder
+                
+                if (-not $itemCorrect -and $existingCorrect) {
+                    Write_Log "  -> Deleting duplicate from wrong location: '$($item.Name)' at $itemFolder"
+                    $plannedDeletes.Add(@{ Path = $item.FullName; Name = $item.Name; Folder = $itemFolder })
+                    $foldersToCheck[$item.DirectoryName] = $true; continue
+                } elseif ($itemCorrect -and -not $existingCorrect) {
+                    Write_Log "  -> Deleting duplicate from wrong location: '$($existing.Name)' at $existingFolder"
+                    & $RemoveConflictingMove $existing.FullName $existing.Name
+                    $plannedDeletes.Add(@{ Path = $existing.FullName; Name = $existing.Name; Folder = $existingFolder })
+                    $foldersToCheck[$existing.DirectoryName] = $true; $actualIndex[$indexKey] = $item
                 } else {
-                    # Both are wrong -> delete current (keep first found)
-                    Write_Log "  -> Both duplicates in wrong location. Deleting second: '$($item.Name)' at $itemFolder (correct: $correctFolder)"
-                    $plannedDeletes.Add(@{ Path = $item.FullName; Name = $item.Name; Folder = $itemFolder; CorrectFolder = $correctFolder })
-                    $foldersToCheck[$item.DirectoryName] = $true
-                    continue
+                    Write_Log "  -> Deleting duplicate: '$($item.Name)' at $itemFolder"
+                    $plannedDeletes.Add(@{ Path = $item.FullName; Name = $item.Name; Folder = $itemFolder })
+                    $foldersToCheck[$item.DirectoryName] = $true; continue
                 }
             } else {
-                # Handle unknown shortcuts (not in config) - need to quarantine with numbered names
+                # Unknown shortcut duplicate - quarantine with numbered names
                 Write_Log "  -> Both duplicates are unknown. Will quarantine with numbered names."
+                $itemInQ = $item.DirectoryName -eq $qFolder
+                $existingInQ = $existing.DirectoryName -eq $qFolder
                 
-                # Check if either is already in the quarantine folder
-                $qFolder = Join-Path $TargetPath $QuarantineFolder
-                $itemInQuarantine = $item.DirectoryName -eq $qFolder
-                $existingInQuarantine = $existing.DirectoryName -eq $qFolder
-                
-                if ($existingInQuarantine -and -not $itemInQuarantine) {
-                    # Existing is already in quarantine, leave it alone and number the current item
-                    if (-not $quarantineCounter.ContainsKey($norm)) {
-                        $quarantineCounter[$norm] = 0
-                    }
-                    $quarantineCounter[$norm]++
-                    $number = $quarantineCounter[$norm]
-                    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($item.Name)
-                    $extension = [System.IO.Path]::GetExtension($item.Name)
-                    $numberedName = "$baseName ($number)$extension"
-                    
-                    $currentFolder = Get_RelativePath $item.DirectoryName
-                    $qDest = Join-Path $TargetPath $QuarantineFolder | Join-Path -ChildPath $numberedName
-                    
-                    $plannedMoves.Add(@{
-                        Type = "Quarantine"
-                        Source = $item.FullName
-                        Destination = $qDest
-                        Name = $item.Name
-                        NewName = $numberedName
-                        CurrentFolder = $currentFolder
-                        DestFolder = $QuarantineFolder
-                    })
-                    
-                    Write_Log "  -> Will quarantine '$($item.Name)' from $currentFolder as '$numberedName'"
-                    continue
-                } elseif ($itemInQuarantine -and -not $existingInQuarantine) {
-                    # Current item is already in quarantine, remove any planned move for existing and number the existing
-                    # Remove any planned quarantine move for the existing shortcut
-                    for ($i = $plannedMoves.Count - 1; $i -ge 0; $i--) {
-                        if ($plannedMoves[$i].Source -eq $existing.FullName) {
-                            Write_Log "  -> Removing conflicting planned quarantine for '$($existing.Name)'"
-                            $plannedMoves.RemoveAt($i)
-                            break
-                        }
-                    }
-                    
-                    # Number the existing one
-                    if (-not $quarantineCounter.ContainsKey($norm)) {
-                        $quarantineCounter[$norm] = 0
-                    }
-                    $quarantineCounter[$norm]++
-                    $number = $quarantineCounter[$norm]
-                    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($existing.Name)
-                    $extension = [System.IO.Path]::GetExtension($existing.Name)
-                    $numberedName = "$baseName ($number)$extension"
-                    
-                    $existingCurrentFolder = Get_RelativePath $existing.DirectoryName
-                    $qDest = Join-Path $TargetPath $QuarantineFolder | Join-Path -ChildPath $numberedName
-                    
-                    $plannedMoves.Add(@{
-                        Type = "Quarantine"
-                        Source = $existing.FullName
-                        Destination = $qDest
-                        Name = $existing.Name
-                        NewName = $numberedName
-                        CurrentFolder = $existingCurrentFolder
-                        DestFolder = $QuarantineFolder
-                    })
-                    
-                    Write_Log "  -> Will quarantine '$($existing.Name)' from $existingCurrentFolder as '$numberedName'"
-                    $actualIndex[$indexKey] = $item
+                if ($existingInQ -and -not $itemInQ) {
+                    $numberedName = & $GetNumberedName $item.Name $norm
+                    & $AddQuarantine $item $numberedName $itemFolder
+                    Write_Log "  -> Will quarantine '$($item.Name)' as '$numberedName'"; continue
+                } elseif ($itemInQ -and -not $existingInQ) {
+                    & $RemoveConflictingMove $existing.FullName $existing.Name
+                    $numberedName = & $GetNumberedName $existing.Name $norm
+                    & $AddQuarantine $existing $numberedName (Get_RelativePath $existing.DirectoryName)
+                    Write_Log "  -> Will quarantine '$($existing.Name)' as '$numberedName'"; $actualIndex[$indexKey] = $item
                 } else {
-                    # Neither or both are in quarantine folder - number the current one (keep first found)
-                    if (-not $quarantineCounter.ContainsKey($norm)) {
-                        $quarantineCounter[$norm] = 0
-                    }
-                    $quarantineCounter[$norm]++
-                    $number = $quarantineCounter[$norm]
-                    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($item.Name)
-                    $extension = [System.IO.Path]::GetExtension($item.Name)
-                    $numberedName = "$baseName ($number)$extension"
-                    
-                    $currentFolder = Get_RelativePath $item.DirectoryName
-                    $qDest = Join-Path $TargetPath $QuarantineFolder | Join-Path -ChildPath $numberedName
-                    
-                    $plannedMoves.Add(@{
-                        Type = "Quarantine"
-                        Source = $item.FullName
-                        Destination = $qDest
-                        Name = $item.Name
-                        NewName = $numberedName
-                        CurrentFolder = $currentFolder
-                        DestFolder = $QuarantineFolder
-                    })
-                    
-                    Write_Log "  -> Will quarantine '$($item.Name)' as '$numberedName'"
-                    continue
+                    $numberedName = & $GetNumberedName $item.Name $norm
+                    & $AddQuarantine $item $numberedName $itemFolder
+                    Write_Log "  -> Will quarantine '$($item.Name)' as '$numberedName'"; continue
                 }
             }
         }
         $actualIndex[$indexKey] = $item
     
         if ($matchKey) {
-            # KNOWN SHORTCUT: Move to correct folder
+            # Known shortcut: move to correct folder
             $relFolder = $ExpectedMap[$matchKey]
-            $destFolder = if ($relFolder -eq "Root" -or [string]::IsNullOrEmpty($relFolder)) {
-                $TargetPath
-            } else {
-                Join-Path $TargetPath $relFolder
-            }
+            $destFolder = if ($relFolder -eq "Root" -or [string]::IsNullOrEmpty($relFolder)) { $TargetPath } else { Join-Path $TargetPath $relFolder }
             $destPath = Join-Path $destFolder $item.Name
             
-            # Only move if it's not already in the right place
             if ($item.FullName -ne $destPath) {
-                $currentFolder = Get_RelativePath $item.DirectoryName
-                $plannedMoves.Add(@{
-                    Type = "Move"
-                    Source = $item.FullName
-                    Destination = $destPath
-                    Name = $item.Name
-                    CurrentFolder = $currentFolder
-                    DestFolder = $relFolder
-                })
+                $plannedMoves.Add(@{ Type = "Move"; Source = $item.FullName; Destination = $destPath
+                    Name = $item.Name; CurrentFolder = (Get_RelativePath $item.DirectoryName); DestFolder = $relFolder })
                 $foldersToCheck[$item.DirectoryName] = $true
             }
             $processed[$matchKey] = $true
         } else {
-            # UNKNOWN SHORTCUT: Quarantine
-            $currentFolder = Get_RelativePath $item.DirectoryName
-            $qDest = Join-Path $TargetPath $QuarantineFolder | Join-Path -ChildPath $item.Name
-            
+            # Unknown shortcut: quarantine
+            $qDest = Join-Path $qFolder $item.Name
             if ($item.FullName -ne $qDest) {
-                $plannedMoves.Add(@{
-                    Type = "Quarantine"
-                    Source = $item.FullName
-                    Destination = $qDest
-                    Name = $item.Name
-                    CurrentFolder = $currentFolder
-                    DestFolder = $QuarantineFolder
-                })
+                $plannedMoves.Add(@{ Type = "Quarantine"; Source = $item.FullName; Destination = $qDest
+                    Name = $item.Name; CurrentFolder = (Get_RelativePath $item.DirectoryName); DestFolder = $QuarantineFolder })
             }
         }
     }
     
-    return @{
-        PlannedMoves = $plannedMoves
-        PlannedDeletes = $plannedDeletes
-        Processed = $processed
-        FoldersToCheck = $foldersToCheck
-    }
+    return @{ PlannedMoves = $plannedMoves; PlannedDeletes = $plannedDeletes; Processed = $processed; FoldersToCheck = $foldersToCheck }
 }
 
 function Detect_MissingShortcuts {
-    param(
-        [hashtable]$ExpectedMap,
-        [hashtable]$Processed,
-        [hashtable]$ShortcutDetailsMap
-    )
+    param([hashtable]$ExpectedMap, [hashtable]$Processed, [hashtable]$ShortcutDetailsMap)
     
-    # Pre-allocate with estimate (usually only a few missing shortcuts)
     $missingShortcuts = [System.Collections.Generic.List[hashtable]]::new(10)
-    $seenMissing = @{}  # Track to avoid duplicates
+    $seenMissing = @{}
     
     foreach ($normName in $ExpectedMap.Keys) {
-        if (-not $Processed.ContainsKey($normName)) {
-            $expectedFolder = $ExpectedMap[$normName]
-            $uniqueKey = "$expectedFolder\$normName"
-            
-            # Skip if already processed
-            if ($seenMissing.ContainsKey($uniqueKey)) {
-                continue
-            }
-            $seenMissing[$uniqueKey] = $true
-            
-            Write_Log "**Missing expected shortcut:** $normName (expected in $expectedFolder)"
-            
-            $detailKey = "$expectedFolder\$normName"
-            $details = $ShortcutDetailsMap[$detailKey]
-            
-            if ($details -and $details.TargetPath) {
-                $missingShortcuts.Add(@{
-                    Name = $normName
-                    Folder = $expectedFolder
-                    Details = $details
-                })
-            } else {
-                Write_Log "  Cannot recreate - no saved details for $normName"
-            }
-        }
+        if ($Processed.ContainsKey($normName)) { continue }
+        $folder = $ExpectedMap[$normName]
+        $key = "$folder\$normName"
+        if ($seenMissing[$key]) { continue }
+        $seenMissing[$key] = $true
+        
+        Write_Log "**Missing expected shortcut:** $normName (expected in $folder)"
+        $details = $ShortcutDetailsMap[$key]
+        if ($details -and $details.TargetPath) {
+            $missingShortcuts.Add(@{ Name = $normName; Folder = $folder; Details = $details })
+        } else { Write_Log "  Cannot recreate - no saved details for $normName" }
     }
-    
     return $missingShortcuts
 }
 
 function Detect_EmptyFolders {
-    param(
-        [string]$TargetPath,
-        [PSCustomObject]$ConfigRaw,
-        $PlannedMoves = @(),
-        $PlannedDeletes = @()
-    )
+    param([string]$TargetPath, [PSCustomObject]$ConfigRaw, $PlannedMoves = @(), $PlannedDeletes = @(), $FoldersCreatedByMigration = $null)
     
-    # Pre-allocate with estimate (usually only a few empty folders)
     $emptyFoldersToDelete = [System.Collections.Generic.List[hashtable]]::new(5)
-    $seenFolders = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)  # Track to avoid duplicates
+    $seenFolders = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     
-    # Build set of expected folders from config
-    $expectedFolders = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    foreach ($folderKey in $ConfigRaw.PSObject.Properties.Name) {
-        if ($folderKey -ne "Root" -and -not [string]::IsNullOrEmpty($folderKey)) {
-            $folderPath = Join-Path $TargetPath $folderKey
-            $expectedFolders.Add($folderPath) | Out-Null
-        }
-    }
+    # Build set of preserved folders (NEVER delete these)
+    $preservedFolders = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    # 1. The target path itself and its Programs subfolder (critical system folders)
+    $preservedFolders.Add($TargetPath) | Out-Null
+    $preservedFolders.Add((Join-Path $TargetPath "Programs")) | Out-Null
+    $preservedFolders.Add((Join-Path $TargetPath "Programs\Startup")) | Out-Null  # Always preserve Startup folder
+    # 2. All folders defined in config (expected folder structure)
+    $ConfigRaw.PSObject.Properties.Name | Where-Object { $_ -ne "Root" -and $_ } | ForEach-Object { $preservedFolders.Add((Join-Path $TargetPath $_)) | Out-Null }
     
-    # Build sets of folders being emptied/filled by moves and deletes
+    # Track folders losing/receiving files
     $foldersBeingEmptied = @{}
     $foldersReceivingFiles = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     
-    # Track folders losing files due to moves
     foreach ($move in @($PlannedMoves)) {
-        # Track source folders losing files
-        $sourceFolder = Split-Path $move.Source -Parent
-        if (-not $foldersBeingEmptied.ContainsKey($sourceFolder)) {
-            $foldersBeingEmptied[$sourceFolder] = @()
-        }
-        $foldersBeingEmptied[$sourceFolder] += $move.Source
-        
-        # Track destination folders receiving files
-        $destFolder = Split-Path $move.Destination -Parent
-        $foldersReceivingFiles.Add($destFolder) | Out-Null
+        $src = Split-Path $move.Source -Parent
+        if (-not $foldersBeingEmptied[$src]) { $foldersBeingEmptied[$src] = @() }
+        $foldersBeingEmptied[$src] += $move.Source
+        $foldersReceivingFiles.Add((Split-Path $move.Destination -Parent)) | Out-Null
     }
-    
-    # Track folders losing files due to deletes
     foreach ($delete in @($PlannedDeletes)) {
-        $sourceFolder = Split-Path $delete.Path -Parent
-        if (-not $foldersBeingEmptied.ContainsKey($sourceFolder)) {
-            $foldersBeingEmptied[$sourceFolder] = @()
-        }
-        $foldersBeingEmptied[$sourceFolder] += $delete.Path
+        $src = Split-Path $delete.Path -Parent
+        if (-not $foldersBeingEmptied[$src]) { $foldersBeingEmptied[$src] = @() }
+        $foldersBeingEmptied[$src] += $delete.Path
     }
     
-    # Scan ALL folders (deepest first for proper deletion order)
-    $allFolders = Get-ChildItem -Path $TargetPath -Directory -Recurse -Force -ErrorAction SilentlyContinue | 
-        Sort-Object { $_.FullName.Split('\').Count } -Descending
+    # Helper to check if folder will be empty
+    $WillBeEmpty = {
+        param($folderPath, $currentItems)
+        if ($currentItems.Count -eq 0) { return $true }
+        if (-not $foldersBeingEmptied[$folderPath]) { return $false }
+        $remaining = @($currentItems.FullName | Where-Object { $_ -notin $foldersBeingEmptied[$folderPath] })
+        return $remaining.Count -eq 0
+    }
     
-    foreach ($folder in $allFolders) {
-        try {
-            # Skip if already processed (avoid duplicates)
-            if ($seenFolders.Contains($folder.FullName)) {
-                continue
+    # Scan existing folders (deepest first)
+    Get-ChildItem -Path $TargetPath -Directory -Recurse -Force -ErrorAction SilentlyContinue | 
+        Sort-Object { $_.FullName.Split('\').Count } -Descending | ForEach-Object {
+        $folder = $_
+        if ($seenFolders.Contains($folder.FullName) -or $preservedFolders.Contains($folder.FullName) -or 
+            $foldersReceivingFiles.Contains($folder.FullName)) { return }
+        
+        $items = @(Get-ChildItem -Path $folder.FullName -Force -ErrorAction SilentlyContinue)
+        if (& $WillBeEmpty $folder.FullName $items) {
+            Write_Log "Empty folder found: $(Get_RelativePath $folder.FullName)"
+            $seenFolders.Add($folder.FullName) | Out-Null
+            $emptyFoldersToDelete.Add(@{ Path = $folder.FullName; DisplayFolder = (Get_RelativePath $folder.FullName) })
+        }
+    }
+    
+    # Also check folders that will be CREATED by migrations (they may end up empty after moves)
+    if ($FoldersCreatedByMigration) {
+        foreach ($folderPath in $FoldersCreatedByMigration) {
+            # Skip preserved folders and folders that will receive files
+            if ($seenFolders.Contains($folderPath) -or $preservedFolders.Contains($folderPath) -or 
+                $foldersReceivingFiles.Contains($folderPath)) { continue }
+            
+            # Safety: Never delete folders at or above the "Programs" level (must be at least 2 levels deep)
+            $relPath = Get_RelativePath $folderPath
+            if ($relPath -eq "Root" -or $relPath -eq "Programs" -or -not $relPath.Contains('\')) { continue }
+            
+            # This folder will be created by migration - check if all its contents will be moved out
+            if ($foldersBeingEmptied[$folderPath]) {
+                # Folder will have files migrated in, then moved out - it will be empty
+                Write_Log "Empty folder found (post-migration): $relPath"
+                $seenFolders.Add($folderPath) | Out-Null
+                $emptyFoldersToDelete.Add(@{ Path = $folderPath; DisplayFolder = $relPath })
             }
-            
-            # Skip if it's an expected folder (preserved even if empty)
-            if ($expectedFolders.Contains($folder.FullName)) {
-                continue
-            }
-            
-            # Skip if this folder is receiving files from moves (won't be empty)
-            if ($foldersReceivingFiles.Contains($folder.FullName)) {
-                continue
-            }
-            
-            # Check if folder is currently empty
-            $items = Get-ChildItem -Path $folder.FullName -Force -ErrorAction SilentlyContinue
-            $currentCount = if ($null -eq $items) { 0 } else { $items.Count }
-            
-            $willBeEmpty = $false
-            
-            if ($currentCount -eq 0) {
-                $willBeEmpty = $true
-            } elseif ($foldersBeingEmptied.ContainsKey($folder.FullName)) {
-                # Check if ALL items in this folder are being moved out
-                $movingOut = $foldersBeingEmptied[$folder.FullName]
-                $allItemPaths = $items | ForEach-Object { $_.FullName }
-                
-                # If all items are in the moving-out list, folder will be empty
-                $remaining = $allItemPaths | Where-Object { $_ -notin $movingOut }
-                if ($remaining.Count -eq 0) {
-                    $willBeEmpty = $true
-                }
-            }
-            
-            if ($willBeEmpty) {
-                $relPath = Get_RelativePath $folder.FullName
-                Write_Log "Empty folder found: $relPath"
-                $seenFolders.Add($folder.FullName) | Out-Null
-                $emptyFoldersToDelete.Add(@{
-                    Path = $folder.FullName
-                    DisplayFolder = $relPath
-                })
-            }
-        } catch {
-            # Ignore errors during scanning
         }
     }
     
     return $emptyFoldersToDelete
 }
 
+function Display_PreviewSection {
+    # Helper to display a preview section with consistent formatting
+    param([string]$Title, [string]$Color, [array]$Items, [scriptblock]$FormatItem)
+    
+    if ($Items.Count -eq 0) { return }
+    Write_Log "$Title ($($Items.Count)):" -Color $Color -ToScreen
+    foreach ($item in $Items) { & $FormatItem $item }
+    Write-Host ""
+}
+
 function Display_EnforcePreview {
+    param($PlannedMoves, $PlannedDeletes, $EmptyFoldersToDelete, $MissingShortcuts, $PlannedUserMigrations, [bool]$DryRun)
+    
+    if (-not $DryRun) { return $true }  # Automated mode, proceed
+    
+    Write-Host "`n$("="*70)" -ForegroundColor Cyan
+    Write-Host " SUMMARY - Planned Changes" -ForegroundColor Cyan
+    Write-Host "$("="*70)`n" -ForegroundColor Cyan
+    
+    # User migrations (Green = positive, Magenta = deletions)
+    $toMigrate = @($PlannedUserMigrations | Where-Object { $_.Type -eq "Migrate" })
+    $toDeleteUser = @($PlannedUserMigrations | Where-Object { $_.Type -eq "Delete" })
+    Display_PreviewSection "USER SHORTCUTS TO MIGRATE" "Green" $toMigrate {
+        param($m); Write-Host (Format_ActionLine -Emoji "📥" -Name $m.Name -Operation "[Migrate]" -Destination $m.RelativePath) -ForegroundColor Green
+        Write_Log "  - $($m.Name) -> $($m.RelativePath)"
+    }
+    Display_PreviewSection "USER SHORTCUTS TO DELETE (already in system)" "Magenta" $toDeleteUser {
+        param($m); Write-Host (Format_ActionLine -Emoji "🗑️" -Name $m.Name -Operation "[Delete]" -Destination "(exists in system)") -ForegroundColor Magenta
+        Write_Log "  - $($m.Name) [already exists at $($m.RelativePath)]"
+    }
+    
+    # System moves, recreations, quarantines
+    $toMove = @($PlannedMoves | Where-Object { $_.Type -eq "Move" })
+    $toQuarantine = @($PlannedMoves | Where-Object { $_.Type -eq "Quarantine" })
+    
+    Display_PreviewSection "MOVES TO CORRECT FOLDERS" "Green" $toMove {
+        param($m); Write-Host (Format_ActionLine -Emoji "➡️" -Name $m.Name -Operation "[Move]" -Source $m.CurrentFolder -Destination $m.DestFolder) -ForegroundColor Green
+        Write_Log "  - $($m.Name) FROM: $($m.CurrentFolder) -> TO: $($m.DestFolder)"
+    }
+    Display_PreviewSection "MISSING SHORTCUTS TO RECREATE" "Green" @($MissingShortcuts) {
+        param($m); Write-Host (Format_ActionLine -Emoji "➕" -Name $m.Name -Operation "[Recreate]" -Destination $m.Folder) -ForegroundColor Green
+        Write_Log "  - $($m.Name) IN: $($m.Folder)"
+    }
+    Display_PreviewSection "UNKNOWN SHORTCUTS TO QUARANTINE" "Yellow" $toQuarantine {
+        param($m); $dn = if ($m.NewName) { "$($m.Name) -> $($m.NewName)" } else { $m.Name }
+        Write-Host (Format_ActionLine -Emoji "🥅" -Name $dn -Operation "[Quarantine]" -Source $m.CurrentFolder -Destination $m.DestFolder) -ForegroundColor Yellow
+        Write_Log "  - $dn FROM: $($m.CurrentFolder) -> TO: $($m.DestFolder)"
+    }
+    Display_PreviewSection "DUPLICATE SHORTCUTS TO DELETE" "Magenta" @($PlannedDeletes) {
+        param($d); Write-Host (Format_ActionLine -Emoji "🎭" -Name $d.Name -Operation "[Delete]" -Destination $d.Folder) -ForegroundColor Magenta
+        Write_Log "  - $($d.Name) IN: $($d.Folder)"
+    }
+    Display_PreviewSection "EMPTY FOLDERS TO DELETE" "Magenta" @($EmptyFoldersToDelete) {
+        param($f); Write-Host (Format_ActionLine -Emoji "🗑️" -Name $f.DisplayFolder -Operation "[Delete]") -ForegroundColor Magenta
+        Write_Log "  - $($f.DisplayFolder)"
+    }
+    
+    Write-Host ("="*70) -ForegroundColor Cyan
+    $response = Read-Host "Do you want to proceed with these changes? (Y/N)"
+    return ($response -eq 'Y' -or $response -eq 'y')
+}
+
+function Execute_PlannedActions {
+    # Generic executor for all action types: moves, quarantines, deletes, recreations, folder deletes
     param(
-        $PlannedMoves,
-        $PlannedDeletes,
-        $EmptyFoldersToDelete,
-        $MissingShortcuts,
-        [bool]$DryRun
+        $Actions,
+        [string]$ActionType,  # "Move", "Quarantine", "Delete", "Recreate", "FolderDelete"
+        [string]$TargetPath = "",
+        [ref]$SuccessCount,
+        [ref]$ErrorCount
     )
     
-    # If dry-run mode, show summary and ask for confirmation
-    if ($DryRun) {
-        Write-Host ""
-        Write-Host ("="*70) -ForegroundColor Cyan
-        Write-Host " SUMMARY - Planned Changes" -ForegroundColor Cyan
-        Write-Host ("="*70) -ForegroundColor Cyan
-        Write-Host ""
+    if ($Actions.Count -eq 0) { return }
     
-        # Show moves (wrap in @() to prevent unwrapping single items)
-        $toMove = @($PlannedMoves | Where-Object { $_.Type -eq "Move" })
-        if ($toMove.Count -gt 0) {
-            Write_Log "MOVES TO CORRECT FOLDERS ($($toMove.Count)):" -Color Green -ToScreen
-            foreach ($move in $toMove) {
-                $line = Format_ActionLine -Emoji "➡️" -Name $move.Name -Operation "[Move]" `
-                    -Source $move.CurrentFolder -Destination $move.DestFolder
-                Write-Host $line -ForegroundColor Green
-                Write_Log "  - $($move.Name) FROM: $($move.CurrentFolder) -> TO: $($move.DestFolder)"
-            }
-            Write-Host ""
-        }
-        
-        # Show missing shortcuts to recreate
-        if ($MissingShortcuts.Count -gt 0) {
-            Write_Log "MISSING SHORTCUTS TO RECREATE ($($MissingShortcuts.Count)):" -Color Cyan -ToScreen
-            foreach ($missing in $MissingShortcuts) {
-                $line = Format_ActionLine -Emoji "➕" -Name $missing.Name -Operation "[Recreate]" `
-                    -Destination $missing.Folder
-                Write-Host $line -ForegroundColor Cyan
-                Write_Log "  - $($missing.Name) IN: $($missing.Folder)"
-            }
-            Write-Host ""
-        }
+    # Action type configuration (Green=positive, Yellow=warning, Magenta=deletion)
+    $config = switch ($ActionType) {
+        "Move"         { @{ Emoji = "➡️"; Op = "[Move]"; Color = "Green"; LogPrefix = "Move" } }
+        "Quarantine"   { @{ Emoji = "🥅"; Op = "[Quarantine]"; Color = "Yellow"; LogPrefix = "Quarantine" } }
+        "Delete"       { @{ Emoji = "🎭"; Op = "[Delete]"; Color = "Magenta"; LogPrefix = "Deleted duplicate" } }
+        "Recreate"     { @{ Emoji = "➕"; Op = "[Recreate]"; Color = "Green"; LogPrefix = "Recreated" } }
+        "FolderDelete" { @{ Emoji = "🗑️"; Op = "[Delete]"; Color = "Magenta"; LogPrefix = "Deleted empty folder" } }
+    }
     
-        # Show quarantines (wrap in @() to prevent unwrapping single items)
-        $toQuarantine = @($PlannedMoves | Where-Object { $_.Type -eq "Quarantine" })
-        if ($toQuarantine.Count -gt 0) {
-            Write_Log "UNKNOWN SHORTCUTS TO QUARANTINE ($($toQuarantine.Count)):" -Color Yellow -ToScreen
-            foreach ($move in $toQuarantine) {
-                # Check if it's being renamed (duplicate unknown shortcut)
-                $displayName = if ($move.NewName) { "$($move.Name) -> $($move.NewName)" } else { $move.Name }
-                $line = Format_ActionLine -Emoji "🥅" -Name $displayName -Operation "[Quarantine]" `
-                    -Source $move.CurrentFolder -Destination $move.DestFolder
-                Write-Host $line -ForegroundColor Yellow
-                if ($move.NewName) {
-                    Write_Log "  - $($move.Name) -> $($move.NewName) FROM: $($move.CurrentFolder) -> TO: $($move.DestFolder)"
-                } else {
-                    Write_Log "  - $($move.Name) FROM: $($move.CurrentFolder) -> TO: $($move.DestFolder)"
+    # For recreations, we need a COM shell object
+    $shell = if ($ActionType -eq "Recreate") { New-Object -ComObject WScript.Shell } else { $null }
+    
+    foreach ($action in $Actions) {
+        try {
+            $displayName = $action.Name
+            $logMsg = ""
+            
+            switch ($ActionType) {
+                "Move" {
+                    Ensure_Folder (Split-Path $action.Destination -Parent)
+                    Move-Item -Path $action.Source -Destination $action.Destination -Force -ErrorAction Stop
+                    $displayName = if ($action.NewName) { "$($action.Name) -> $($action.NewName)" } else { $action.Name }
+                    $logMsg = "$($config.LogPrefix): $displayName from $($action.CurrentFolder) to $($action.DestFolder)"
+                }
+                "Quarantine" {
+                    Ensure_Folder (Split-Path $action.Destination -Parent)
+                    Move-Item -Path $action.Source -Destination $action.Destination -Force -ErrorAction Stop
+                    $displayName = if ($action.NewName) { "$($action.Name) -> $($action.NewName)" } else { $action.Name }
+                    $logMsg = "$($config.LogPrefix): $displayName from $($action.CurrentFolder) to $($action.DestFolder)"
+                }
+                "Delete" {
+                    Remove-Item -Path $action.Path -Force -ErrorAction Stop
+                    $logMsg = "$($config.LogPrefix): $($action.Name) from $($action.Folder)"
+                }
+                "Recreate" {
+                    $folder = if ($action.Folder -eq "Root" -or [string]::IsNullOrEmpty($action.Folder)) { $TargetPath } else { Join-Path $TargetPath $action.Folder }
+                    Ensure_Folder $folder
+                    $sc = $shell.CreateShortcut((Join-Path $folder $action.Name))
+                    $sc.TargetPath = $action.Details.TargetPath
+                    if ($action.Details.Arguments) { $sc.Arguments = $action.Details.Arguments }
+                    if ($action.Details.WorkingDirectory) { $sc.WorkingDirectory = $action.Details.WorkingDirectory }
+                    if ($action.Details.IconLocation) { $sc.IconLocation = $action.Details.IconLocation }
+                    if ($action.Details.Description) { $sc.Description = $action.Details.Description }
+                    $sc.Save()
+                    $logMsg = "$($config.LogPrefix): $($action.Name) in $($action.Folder)"
+                }
+                "FolderDelete" {
+                    $items = Get-ChildItem -Path $action.Path -Force -ErrorAction SilentlyContinue
+                    if ($null -ne $items -and $items.Count -gt 0) {
+                        # Folder not empty - skip with warning
+                        $line = Format_ActionLine -Emoji $config.Emoji -Name $action.DisplayFolder -Operation $config.Op -StatusEmoji "⚠️"
+                        Write-Host $line -ForegroundColor Yellow
+                        Write_Log "Skipped deletion (folder not empty): $($action.DisplayFolder)"
+                        continue
+                    }
+                    Remove-Item -Path $action.Path -Force -ErrorAction Stop
+                    $displayName = $action.DisplayFolder
+                    $logMsg = "$($config.LogPrefix): $($action.DisplayFolder)"
                 }
             }
-            Write-Host ""
-        }
-
-        # Show deletes (duplicates)
-        if ($PlannedDeletes.Count -gt 0) {
-            Write_Log "DUPLICATE SHORTCUTS TO DELETE ($($PlannedDeletes.Count)):" -Color Red -ToScreen
-            foreach ($delete in $PlannedDeletes) {
-                $line = Format_ActionLine -Emoji "🎭" -Name $delete.Name -Operation "[Delete]" `
-                    -Destination $delete.Folder
-                Write-Host $line -ForegroundColor Red
-                Write_Log "  - $($delete.Name) IN: $($delete.Folder)"
-            }
-            Write-Host ""
-        }        
-
-        # Show empty folders (wrap in @() to handle single items correctly)
-        if ($EmptyFoldersToDelete.Count -gt 0) {
-            Write_Log "EMPTY FOLDERS TO DELETE ($($EmptyFoldersToDelete.Count)):" -Color Magenta -ToScreen
-            foreach ($folder in @($EmptyFoldersToDelete)) {
-                $line = Format_ActionLine -Emoji "🗑️" -Name $folder.DisplayFolder -Operation "[Delete]"
-                Write-Host $line -ForegroundColor Magenta
-                Write_Log "  - $($folder.DisplayFolder)"
-            }
-            Write-Host ""
-        }
-        
-        Write-Host ("="*70) -ForegroundColor Cyan
-        
-        # Ask for confirmation
-        $response = Read-Host "Do you want to proceed with these changes? (Y/N)"
-        return ($response -eq 'Y' -or $response -eq 'y')
-    }
-    
-    return $true  # Automated mode, proceed
-}
-
-function Execute_ShortcutMoves {
-    param(
-        $PlannedMoves,
-        [ref]$SuccessCount,
-        [ref]$ErrorCount
-    )
-    
-    if ($PlannedMoves.Count -eq 0) { return }
-    
-    foreach ($move in $PlannedMoves) {
-        try {
-            # Ensure destination folder exists
-            $destFolder = Split-Path $move.Destination -Parent
-            Ensure_Folder $destFolder
             
-            # Use PowerShell Move-Item (requires admin privileges)
-            Move-Item -Path $move.Source -Destination $move.Destination -Force -ErrorAction Stop
-            
-            # Determine operation emoji and type based on move type
-            $emoji = if ($move.Type -eq "Quarantine") { "🥅" } else { "➡️" }
-            $operation = if ($move.Type -eq "Quarantine") { "[Quarantine]" } else { "[Move]" }
-            $color = if ($move.Type -eq "Quarantine") { "Yellow" } else { "Green" }
-            
-            # Display name (handle renamed shortcuts)
-            $displayName = if ($move.NewName) { "$($move.Name) -> $($move.NewName)" } else { $move.Name }
-            
-            # Print compact success line (optimized)
-            $line = Format_ActionLine -Emoji $emoji -Name $displayName -Operation $operation `
-                -Source $move.CurrentFolder -Destination $move.DestFolder -StatusEmoji "✅"
-            Write-Host $line -ForegroundColor $color
-            
-            if ($move.NewName) {
-                Write_Log "$($move.Type): $($move.Name) -> $($move.NewName) from $($move.CurrentFolder) to $($move.DestFolder)"
-            } else {
-                Write_Log "$($move.Type): $($move.Name) from $($move.CurrentFolder) to $($move.DestFolder)"
-            }
+            # Success output
+            $src = if ($action.CurrentFolder) { $action.CurrentFolder } else { "" }
+            $dst = if ($action.DestFolder) { $action.DestFolder } elseif ($action.Folder) { $action.Folder } elseif ($action.DisplayFolder) { "" } else { "" }
+            $line = Format_ActionLine -Emoji $config.Emoji -Name $displayName -Operation $config.Op -Source $src -Destination $dst -StatusEmoji "✅"
+            Write-Host $line -ForegroundColor $config.Color
+            Write_Log $logMsg
             $SuccessCount.Value++
         } catch {
-            # Print compact error line (optimized - always use Red for errors regardless of type)
-            $emoji = if ($move.Type -eq "Quarantine") { "🥅" } else { "➡️" }
-            $operation = if ($move.Type -eq "Quarantine") { "[Quarantine]" } else { "[Move]" }
-            $displayName = if ($move.NewName) { "$($move.Name) -> $($move.NewName)" } else { $move.Name }
-            $line = Format_ActionLine -Emoji $emoji -Name $displayName -Operation $operation `
-                -Source $move.CurrentFolder -Destination $move.DestFolder -StatusEmoji "❌"
+            # Error output
+            $line = Format_ActionLine -Emoji $config.Emoji -Name $displayName -Operation $config.Op -StatusEmoji "❌"
             Write-Host $line -ForegroundColor Red
-            
-            Write_Log "$($move.Type) failed: $($move.Name) - $_"
-            $ErrorCount.Value++
-        }
-    }
-}
-
-function Execute_ShortcutRecreations {
-    param(
-        $MissingShortcuts,
-        [string]$TargetPath,
-        [ref]$SuccessCount,
-        [ref]$ErrorCount
-    )
-    
-    if ($MissingShortcuts.Count -eq 0) { return }
-    
-    $shell = New-Object -ComObject WScript.Shell
-    
-    foreach ($missing in $MissingShortcuts) {
-        try {
-            $folder = if ($missing.Folder -eq "Root" -or [string]::IsNullOrEmpty($missing.Folder)) {
-                $TargetPath
-            } else {
-                Join-Path $TargetPath $missing.Folder
-            }
-            Ensure_Folder $folder
-            
-            $shortcutPath = Join-Path $folder $missing.Name
-            
-            $shortcut = $shell.CreateShortcut($shortcutPath)
-            $shortcut.TargetPath = $missing.Details.TargetPath
-            if ($missing.Details.Arguments) { $shortcut.Arguments = $missing.Details.Arguments }
-            if ($missing.Details.WorkingDirectory) { $shortcut.WorkingDirectory = $missing.Details.WorkingDirectory }
-            if ($missing.Details.IconLocation) { $shortcut.IconLocation = $missing.Details.IconLocation }
-            if ($missing.Details.Description) { $shortcut.Description = $missing.Details.Description }
-            $shortcut.Save()
-            
-            # Print compact success line (optimized)
-            $line = Format_ActionLine -Emoji "➕" -Name $missing.Name -Operation "[Recreate]" `
-                -Destination $missing.Folder -StatusEmoji "✅"
-            Write-Host $line -ForegroundColor Cyan
-            
-            Write_Log "Recreated: $($missing.Name) in $($missing.Folder)"
-            $SuccessCount.Value++
-        } catch {
-            # Print compact error line (optimized)
-            $line = Format_ActionLine -Emoji "➕" -Name $missing.Name -Operation "[Recreate]" `
-                -Destination $missing.Folder -StatusEmoji "❌"
-            Write-Host $line -ForegroundColor Red
-            
-            Write_Log "Recreate failed: $($missing.Name) - $_"
+            Write_Log "$($config.LogPrefix) failed: $displayName - $_"
             $ErrorCount.Value++
         }
     }
     
-    [System.Runtime.Interopservices.Marshal]::ReleaseComObject($shell) | Out-Null
-}
-
-function Execute_ShortcutDeletes {
-    param(
-        $PlannedDeletes,
-        [ref]$SuccessCount,
-        [ref]$ErrorCount
-    )
-    
-    if ($PlannedDeletes.Count -eq 0) { return }
-    
-    foreach ($delete in $PlannedDeletes) {
-        try {
-            Remove-Item -Path $delete.Path -Force -ErrorAction Stop
-            
-            # Print compact success line (optimized)
-            $line = Format_ActionLine -Emoji "🎭" -Name $delete.Name -Operation "[Delete]" `
-                -Destination $delete.Folder -StatusEmoji "✅"
-            Write-Host $line -ForegroundColor Red
-            
-            Write_Log "Deleted duplicate: $($delete.Name) from $($delete.Folder)"
-            $SuccessCount.Value++
-        } catch {
-            # Print compact error line (optimized)
-            $line = Format_ActionLine -Emoji "🎭" -Name $delete.Name -Operation "[Delete]" `
-                -Destination $delete.Folder -StatusEmoji "❌"
-            Write-Host $line -ForegroundColor Red
-            
-            Write_Log "Delete failed: $($delete.Name) - $_"
-            $ErrorCount.Value++
-        }
-    }
-}
-
-function Execute_FolderDeletes {
-    param(
-        $EmptyFoldersToDelete,
-        [ref]$SuccessCount,
-        [ref]$ErrorCount
-    )
-    
-    if ($EmptyFoldersToDelete.Count -eq 0) { return }
-    
-    foreach ($folder in $EmptyFoldersToDelete) {
-        try {
-            # Double-check folder is still empty before deletion
-            $items = Get-ChildItem -Path $folder.Path -Force -ErrorAction SilentlyContinue
-            if ($null -eq $items -or $items.Count -eq 0) {
-                Remove-Item -Path $folder.Path -Force -ErrorAction Stop
-                
-                # Print compact success line (optimized)
-                $line = Format_ActionLine -Emoji "🗑️" -Name $folder.DisplayFolder -Operation "[Delete]" -StatusEmoji "✅"
-                Write-Host $line -ForegroundColor Magenta
-                
-                Write_Log "Deleted empty folder: $($folder.DisplayFolder)"
-                $SuccessCount.Value++
-            } else {
-                # Print compact skip line (optimized)
-                $line = Format_ActionLine -Emoji "🗑️" -Name $folder.DisplayFolder -Operation "[Delete]" -StatusEmoji "⚠️"
-                Write-Host $line -ForegroundColor Yellow
-                
-                Write_Log "Skipped deletion (folder not empty): $($folder.DisplayFolder)"
-            }
-        } catch {
-            # Print compact error line (optimized)
-            $line = Format_ActionLine -Emoji "🗑️" -Name $folder.DisplayFolder -Operation "[Delete]" -StatusEmoji "❌"
-            Write-Host $line -ForegroundColor Red
-            
-            Write_Log "Error deleting folder: $($folder.DisplayFolder) - $_"
-            $ErrorCount.Value++
-        }
-    }
+    if ($shell) { [System.Runtime.Interopservices.Marshal]::ReleaseComObject($shell) | Out-Null }
 }
 
 # =============================================================================================================
@@ -1456,7 +1069,7 @@ function Invoke_SaveMode {
     Save_ConfigFile -ConfigTree $sortedTree -ConfigPath $configPath
     
     # Create backup
-    Create_StartMenuBackup -TargetPath $target -ConfigPath $configPath
+    $null = Create_StartMenuBackup -TargetPath $target -BackupFolder (Split-Path $configPath -Parent) -Label "SystemStartMenu"
     
     # Display the saved configuration
     Write-Host ""
@@ -1467,7 +1080,7 @@ function Invoke_SaveMode {
 function Invoke_ReadMode {
     if (-not (Test-Path $configPath)) { throw "Config not found: $configPath" }
     
-    Write-Host "Reading config file..." -ForegroundColor Cyan
+    Write-Host "Reading config file..." -ForegroundColor Gray
     Write_Log "Reading config: $configPath"
     
     $config = Get-Content $configPath -Raw | ConvertFrom-Json
@@ -1482,32 +1095,92 @@ function Invoke_ReadMode {
 function Invoke_EnforceMode {
     if (-not (Test-Path $configPath)) { throw "Config not found: $configPath" }
     
-    # First, migrate user shortcuts to system-wide location
-    Migrate_UserShortcutsToSystemWide
+    # First, scan user shortcuts for migration (preview only, no file operations yet)
+    $plannedUserMigrations = Scan_UserShortcutsForMigration
     
     $configRaw = Get-Content $configPath -Raw | ConvertFrom-Json
     
     # Build config lookup tables
     $configData = Build_ConfigLookupTable -ConfigRaw $configRaw -TargetPath $target
     
-    # Scan and organize shortcuts
+    # Scan and organize shortcuts (existing system shortcuts)
     $scanResults = Scan_AndOrganizeShortcuts -TargetPath $target `
         -AllConfigShortcuts $configData.AllConfigShortcuts `
         -ExpectedMap $configData.ExpectedMap `
         -QuarantineFolder $quarantineFolder
+    
+    # Also plan moves for user shortcuts that will be migrated (they'll need organizing too)
+    # This ensures migrated shortcuts end up in the correct folder per config
+    # Also track folders that will be created by migrations (for empty folder detection)
+    $foldersCreatedByMigration = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    
+    foreach ($migration in @($plannedUserMigrations)) {
+        if ($migration.Type -eq "Migrate") {
+            # Track folder that will be created by this migration
+            $migrationDestFolder = Split-Path $migration.Destination -Parent
+            $foldersCreatedByMigration.Add($migrationDestFolder) | Out-Null
+            
+            # Check if this shortcut needs to be moved after migration
+            $matchKey = Get_ShortcutMatchKey -shortcutName $migration.Name `
+                -AllConfigShortcuts $configData.AllConfigShortcuts -ExpectedMap $configData.ExpectedMap
+            
+            if ($matchKey -and $configData.ExpectedMap.ContainsKey($matchKey)) {
+                $expectedFolder = $configData.ExpectedMap[$matchKey]
+                $expectedFullPath = if ($expectedFolder -eq "Root" -or [string]::IsNullOrEmpty($expectedFolder)) {
+                    $target
+                } else {
+                    Join-Path $target $expectedFolder
+                }
+                $expectedDestPath = Join-Path $expectedFullPath $migration.Name
+                
+                # Mark as processed - migrated shortcuts don't need recreation
+                $scanResults.Processed[$matchKey] = $true
+                
+                # If migration destination differs from expected location, also plan a move
+                if ($migration.Destination -ne $expectedDestPath) {
+                    $migrationFolder = Get_RelativePath $migrationDestFolder
+                    $scanResults.PlannedMoves.Add(@{
+                        Type = "Move"
+                        Source = $migration.Destination  # Source is where migration puts it
+                        Destination = $expectedDestPath
+                        Name = $migration.Name
+                        CurrentFolder = $migrationFolder
+                        DestFolder = $expectedFolder
+                    })
+                }
+            } else {
+                # Unknown shortcut being migrated - will need quarantine after migration
+                $migrationFolder = Get_RelativePath $migrationDestFolder
+                $qDest = Join-Path $target $quarantineFolder | Join-Path -ChildPath $migration.Name
+                
+                if ($migration.Destination -ne $qDest) {
+                    $scanResults.PlannedMoves.Add(@{
+                        Type = "Quarantine"
+                        Source = $migration.Destination
+                        Destination = $qDest
+                        Name = $migration.Name
+                        CurrentFolder = $migrationFolder
+                        DestFolder = $quarantineFolder
+                    })
+                }
+            }
+        }
+    }
     
     # Detect missing shortcuts that need recreation
     $missingShortcuts = Detect_MissingShortcuts -ExpectedMap $configData.ExpectedMap `
         -Processed $scanResults.Processed `
         -ShortcutDetailsMap $configData.ShortcutDetailsMap
     
-    # Detect empty folders (pass planned moves and deletes to detect folders that will become empty)
+    # Detect empty folders (pass planned moves, deletes, and folders created by migrations)
     $emptyFoldersToDelete = Detect_EmptyFolders -TargetPath $target -ConfigRaw $configRaw `
-        -PlannedMoves $scanResults.PlannedMoves -PlannedDeletes $scanResults.PlannedDeletes
+        -PlannedMoves $scanResults.PlannedMoves -PlannedDeletes $scanResults.PlannedDeletes `
+        -FoldersCreatedByMigration $foldersCreatedByMigration
     
     # Check if there are any changes
     $hasChanges = ($scanResults.PlannedMoves.Count -gt 0 -or $scanResults.PlannedDeletes.Count -gt 0 -or `
-                   $emptyFoldersToDelete.Count -gt 0 -or $missingShortcuts.Count -gt 0)
+                   $emptyFoldersToDelete.Count -gt 0 -or $missingShortcuts.Count -gt 0 -or `
+                   $plannedUserMigrations.Count -gt 0)
     
     if (-not $hasChanges) {
         Write_Log "No changes needed - all shortcuts are already in correct locations!" -Color Green -ToScreen
@@ -1520,6 +1193,7 @@ function Invoke_EnforceMode {
         -PlannedDeletes @($scanResults.PlannedDeletes) `
         -EmptyFoldersToDelete @($emptyFoldersToDelete) `
         -MissingShortcuts @($missingShortcuts) `
+        -PlannedUserMigrations @($plannedUserMigrations) `
         -DryRun $dryRun
     
     # If user cancelled, exit early
@@ -1528,46 +1202,58 @@ function Invoke_EnforceMode {
         return
     }
     
+    # Create backups before making any changes
+    $backupFolder = Split-Path $configPath -Parent
+    $hasUserChanges = $plannedUserMigrations.Count -gt 0
+    $hasSystemChanges = ($scanResults.PlannedMoves.Count -gt 0 -or $scanResults.PlannedDeletes.Count -gt 0 -or 
+                         $missingShortcuts.Count -gt 0 -or $emptyFoldersToDelete.Count -gt 0)
+    
+    Write-Host ""
+    Write-Host ("="*70) -ForegroundColor Cyan
+    Write-Host " CREATING BACKUPS" -ForegroundColor Cyan
+    Write-Host ("="*70) -ForegroundColor Cyan
+    
+    if ($hasUserChanges) {
+        $null = Create_StartMenuBackup -TargetPath $userStartMenuPath -BackupFolder $backupFolder -Label "UserStartMenu"
+    }
+    if ($hasSystemChanges) {
+        $null = Create_StartMenuBackup -TargetPath $target -BackupFolder $backupFolder -Label "SystemStartMenu"
+    }
+    if (-not $hasUserChanges -and -not $hasSystemChanges) {
+        Write-Host "  No backups needed (no changes planned)" -ForegroundColor Gray
+    }
+    
     # Execute all changes
     Write-Host ""
-    Write-Host ("="*70) -ForegroundColor Green
-    Write-Host " EXECUTION" -ForegroundColor Green
-    Write-Host ("="*70) -ForegroundColor Green
+    Write-Host ("="*70) -ForegroundColor Cyan
+    Write-Host " EXECUTION" -ForegroundColor Cyan
+    Write-Host ("="*70) -ForegroundColor Cyan
     $successCount = 0
     $errorCount = 0
 
-    # Execute in correct order: moves -> recreations -> quarantines -> duplicate deletes -> folder deletes
+    # Execute in correct order: user migrations -> moves -> recreations -> quarantines -> duplicate deletes -> folder deletes
     
-    # 1. Execute moves (regular moves only, not quarantines)
+    # 0. Execute user migrations first (moves user shortcuts to system location)
+    if ($plannedUserMigrations.Count -gt 0) {
+        Execute_UserMigrations -PlannedMigrations @($plannedUserMigrations) `
+            -SuccessCount ([ref]$successCount) -ErrorCount ([ref]$errorCount)
+    }
+    
+    # 1-5. Execute all planned system path actions
     $regularMoves = @($scanResults.PlannedMoves | Where-Object { $_.Type -eq "Move" })
-    if ($regularMoves.Count -gt 0) {
-        Execute_ShortcutMoves -PlannedMoves $regularMoves `
-            -SuccessCount ([ref]$successCount) -ErrorCount ([ref]$errorCount)
-    }
-    
-    # 2. Execute recreations (use @() to prevent unwrapping single-item collections)
-    Execute_ShortcutRecreations -MissingShortcuts @($missingShortcuts) `
-        -TargetPath $target `
-        -SuccessCount ([ref]$successCount) -ErrorCount ([ref]$errorCount)
-    
-    # 3. Execute quarantines
     $quarantineMoves = @($scanResults.PlannedMoves | Where-Object { $_.Type -eq "Quarantine" })
-    if ($quarantineMoves.Count -gt 0) {
-        Execute_ShortcutMoves -PlannedMoves $quarantineMoves `
-            -SuccessCount ([ref]$successCount) -ErrorCount ([ref]$errorCount)
+    
+    if ($hasSystemChanges) {
+        Write-Host ("="*70) -ForegroundColor Cyan
+        Write-Host " SYSTEM START MENU CHANGES" -ForegroundColor Cyan
+        Write-Host ("="*70) -ForegroundColor Cyan
     }
     
-    # 4. Execute duplicate deletes
-    if ($scanResults.PlannedDeletes.Count -gt 0) {
-        Execute_ShortcutDeletes -PlannedDeletes @($scanResults.PlannedDeletes) `
-            -SuccessCount ([ref]$successCount) -ErrorCount ([ref]$errorCount)
-    }
-    
-    # 5. Clean up empty folders (use pre-computed list from before execution)
-    if ($emptyFoldersToDelete.Count -gt 0) {
-        Execute_FolderDeletes -EmptyFoldersToDelete @($emptyFoldersToDelete) `
-            -SuccessCount ([ref]$successCount) -ErrorCount ([ref]$errorCount)
-    }
+    Execute_PlannedActions -Actions $regularMoves -ActionType "Move" -SuccessCount ([ref]$successCount) -ErrorCount ([ref]$errorCount)
+    Execute_PlannedActions -Actions @($missingShortcuts) -ActionType "Recreate" -TargetPath $target -SuccessCount ([ref]$successCount) -ErrorCount ([ref]$errorCount)
+    Execute_PlannedActions -Actions $quarantineMoves -ActionType "Quarantine" -SuccessCount ([ref]$successCount) -ErrorCount ([ref]$errorCount)
+    Execute_PlannedActions -Actions @($scanResults.PlannedDeletes) -ActionType "Delete" -SuccessCount ([ref]$successCount) -ErrorCount ([ref]$errorCount)
+    Execute_PlannedActions -Actions @($emptyFoldersToDelete) -ActionType "FolderDelete" -SuccessCount ([ref]$successCount) -ErrorCount ([ref]$errorCount)
     
     # Summary
     Write-Host ""

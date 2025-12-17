@@ -1,6 +1,6 @@
 # 📂 Start Menu Manager
 
-A dual-mode PowerShell script that automates Windows Start Menu organization. 
+A PowerShell script that automates Windows Start Menu organization with automatic backups and user-to-system shortcut migration.
 
 **😤 The Problem**
 
@@ -17,6 +17,8 @@ This script solves that problem permanently. Set up your ideal folder structure 
   - **READ** - Display your current config structure without making changes
   - **SAVE** - Backup current Start Menu structure to a JSON config file
   - **ENFORCE** - Restore the Start Menu to match your saved structure
+- **User Shortcut Migration**: Automatically moves shortcuts from user Start Menu to system-wide location for unified management
+- **Automatic Backups**: Creates timestamped zip backups before making any changes (both SAVE and ENFORCE modes)
 - **Smart Normalization**: Handles app version updates gracefully (e.g., `Chrome v120 (64-bit).lnk` → `Chrome v121.lnk` automatically matches)
 - **Architecture Variant Detection**: Intelligently manages different variants like "ODBC (32-bit)" and "ODBC (64-bit)" as separate entries
 - **Duplicate Management**: Automatically detects and removes duplicate shortcuts, keeping the one in the correct location
@@ -54,53 +56,16 @@ C:\ProgramData\Microsoft\Windows\Start Menu\Programs
 - Some portable apps and user-installed software use this location
 - Windows merges both locations when displaying the Start Menu
 
-### ⚙️ Script Configuration
+### ⚙️ How the Script Handles Both Locations
 
-The script can manage **either location** by changing the `$target` variable:
+In ENFORCE mode, the script automatically:
+1. **Scans the user Start Menu** for shortcuts
+2. **Migrates them to the system-wide location** (deleting duplicates that already exist)
+3. **Organizes all shortcuts** in the system location according to your config
 
-```powershell
-# For All Users (default):
-$target = "C:\ProgramData\Microsoft\Windows\Start Menu"
+This means you don't need to manage two locations separately - the script consolidates everything into the system-wide Start Menu.
 
-# For Current User only:
-$target = "$env:APPDATA\Microsoft\Windows\Start Menu"
-```
 
-You can run the script twice with different configs to manage both locations separately, or use the Pro Tip below for a unified approach.
-
-### 💎 Pro Tip: Junction for Unified Management
-
-If you're the only user or want to manage everything from one place, create a **directory junction** from your user Start Menu to the all-users Start Menu:
-
-```powershell
-# ⚠️ CAUTION: Advanced users only! Backup first!
-# Run PowerShell as Administrator
-
-# 1. Backup and consolidate shortcuts
-$userMenu = "$env:APPDATA\Microsoft\Windows\Start Menu"
-$allUsersMenu = "C:\ProgramData\Microsoft\Windows\Start Menu"
-
-# Move user shortcuts to all-users location
-Move-Item "$userMenu\Programs\*" "$allUsersMenu\Programs\" -Force
-
-# Remove the old folder
-Remove-Item "$userMenu\Programs" -Recurse -Force
-
-# Create junction (symbolic link)
-cmd /c mklink /J "$userMenu\Programs" "$allUsersMenu\Programs"
-```
-
-**Benefits:**
-- ✅ Single location to manage all shortcuts
-- ✅ No duplicate shortcuts in different locations
-- ✅ Simplified maintenance and organization
-
-**Risks:**
-- ⚠️ Changes affect all users on the system (if multi-user setup)
-- ⚠️ Requires admin privileges for all shortcut operations
-- ⚠️ Some installers might behave unexpectedly
-
-> **⚠️ DISCLAIMER:** Creating junctions modifies system directories. While generally safe, I am not responsible for any issues, data loss, or system instability that may result. Always backup important data and test in a non-production environment first. Proceed at your own risk.
 
 ## 📋 Prerequisites
 
@@ -140,7 +105,7 @@ Select option **[2] SAVE** from the menu, or run directly:
 .\start_menu_manager.ps1 -Mode SAVE
 ```
 
-This creates `StartMenuConfig.json` with your current Start Menu structure.
+This creates `StartMenuConfig.json` with your current Start Menu structure and a backup zip.
 
 ### 4️⃣ Test Your Configuration
 
@@ -247,6 +212,7 @@ Select an option (1-4):
 ```powershell
 MODE: ENFORCE, MANUAL
 
+Reading config file...
 Scanning shortcuts at C:\ProgramData\Microsoft\Windows\Start Menu...
 Processing 135 shortcuts...
 
@@ -254,24 +220,27 @@ Processing 135 shortcuts...
  SUMMARY - Planned Changes
 ======================================================================
 
+USER SHORTCUTS TO MIGRATE (2):
+  📥 Cursor.lnk                            [Migrate]            IN: Programs\Cursor.lnk
+  📥 Everything.lnk                        [Migrate]            IN: Programs\Everything.lnk
+
 MOVES TO CORRECT FOLDERS (3):
-  ➡️ Chrome.lnk                           [Move]               FROM: Root                      -> TO: Programs                       
+  ➡️ Chrome.lnk                            [Move]               FROM: Root                      -> TO: Programs
 
 MISSING SHORTCUTS TO RECREATE (1):
-  ➕ WinRAR.lnk                           [Recreate]           IN: Programs                                                           
+  ➕ WinRAR.lnk                            [Recreate]           IN: Programs
 
 UNKNOWN SHORTCUTS TO QUARANTINE (2):
-  🥅 Unknown App.lnk                      [Quarantine]         FROM: Programs                  -> TO: Programs\Unsorted              
-  🥅 what.lnk -> what (1).lnk             [Quarantine]         FROM: Programs\New folder       -> TO: Programs\Unsorted              
+  🥅 Unknown App.lnk                       [Quarantine]         FROM: Programs                  -> TO: Programs\Unsorted
+  🥅 what.lnk -> what (1).lnk              [Quarantine]         FROM: Programs\New folder       -> TO: Programs\Unsorted
 
 DUPLICATE SHORTCUTS TO DELETE (1):
-  🎭 WeMod.lnk                            [Delete]             IN: Programs                                                           
+  🎭 WeMod.lnk                             [Delete]             IN: Programs
 
 EMPTY FOLDERS TO DELETE (1):
-  🗑️ Programs\New folder                  [Delete]                                                                                   
+  🗑️ Programs\New folder                   [Delete]
 
 ======================================================================
-
 Do you want to proceed with these changes? (Y/N):
 ```
 
@@ -279,47 +248,78 @@ Do you want to proceed with these changes? (Y/N):
 
 ```
 ======================================================================
+ CREATING BACKUPS
+======================================================================
+Creating UserStartMenu backup...
+  ✅ Backup: E:\OneDrive\Backups\Start Menu\UserStartMenuBackup_20251216_204405.zip
+Creating SystemStartMenu backup...
+  ✅ Backup: E:\OneDrive\Backups\Start Menu\SystemStartMenuBackup_20251216_204405.zip
+
+======================================================================
  EXECUTION
 ======================================================================
-➡️ Chrome.lnk                           [Move]               FROM: Root                      -> TO: Programs                        ✅
-➕ WinRAR.lnk                           [Recreate]           IN: Programs                                                           ✅
-🥅 Unknown App.lnk                      [Quarantine]         FROM: Programs                  -> TO: Programs\Unsorted               ✅
-🥅 what.lnk -> what (1).lnk             [Quarantine]         FROM: Programs\New folder       -> TO: Programs\Unsorted               ✅
-🎭 WeMod.lnk                            [Delete]             IN: Programs                                                           ✅
-🗑️ Programs\New folder                  [Delete]                                                                                    ✅
 
-Completed! 6 successful, 0 errors.
-See log: D:\OneDrive\Backups\Start Menu\StartMenuManager.log
+======================================================================
+ USER START MENU CHANGES
+======================================================================
+
+Migrating shortcuts to system-wide location...
+  ✅ Cursor.lnk                             -> Programs\Cursor.lnk
+  ✅ Everything.lnk                         -> Programs\Everything.lnk
+  Migrated: 2, Deleted (duplicates): 0
+
+Cleaning up empty folders...
+  🗑️  Removed: Programs\New folder
+  📌 Preserved: Programs\Startup
+
+======================================================================
+ SYSTEM START MENU CHANGES
+======================================================================
+  ➡️ Chrome.lnk                            [Move]               FROM: Root                      -> TO: Programs                        ✅
+  ➕ WinRAR.lnk                            [Recreate]           IN: Programs                                                            ✅
+  🥅 Unknown App.lnk                       [Quarantine]         FROM: Programs                  -> TO: Programs\Unsorted               ✅
+  🎭 WeMod.lnk                             [Delete]             IN: Programs                                                            ✅
+  🗑️ Programs\New folder                   [Delete]                                                                                     ✅
+
+Completed! 8 successful, 0 errors.
+See log: E:\OneDrive\Backups\Start Menu\StartMenuManager.log
 ```
 
 #### Log File Format
 
 ```
-============================== 11/09/2025 19:00:00 ==============================
+============================== 12/16/2025 19:00:00 ==============================
 
 MODE: ENFORCE, AUTOMATED
 
+Reading config file...
 Scanning shortcuts at C:\ProgramData\Microsoft\Windows\Start Menu...
 Processing 135 shortcuts...
+
+Backup created: E:\OneDrive\Backups\Start Menu\UserStartMenuBackup_20251216_190000.zip
+Backup created: E:\OneDrive\Backups\Start Menu\SystemStartMenuBackup_20251216_190000.zip
+
+Migrated: Cursor.lnk to Programs\Cursor.lnk
+Migrated: Everything.lnk to Programs\Everything.lnk
+Removed empty user folder: Programs\New folder
 
 Move: Chrome.lnk from Root to Programs
 Recreate: WinRAR.lnk in Programs
 Quarantine: Unknown App.lnk from Programs to Programs\Unsorted
-Quarantine: what.lnk -> what (1).lnk from Programs\New folder to Programs\Unsorted
 Deleted duplicate: WeMod.lnk from Programs
 Deleted empty folder: Programs\New folder
 
-Completed! 6 successful, 0 errors.
+Completed! 8 successful, 0 errors.
 ```
 
 ## 🎯 How It Works
 
 ### 💾 SAVE Mode
-1. Scans your entire Start Menu structure recursively
+1. Scans your entire system Start Menu structure recursively
 2. Reads shortcut details (target path, arguments, icon, description)
 3. Groups shortcuts by their current folders
 4. Generates a JSON configuration file with alphabetically sorted folders and shortcuts
-5. Creates a timestamped zip backup of your entire Start Menu
+5. Creates a timestamped zip backup (`SystemStartMenuBackup_yyyyMMdd_HHmmss.zip`)
 6. **PowerShell 7+**: Uses parallel processing (5 threads) for 2-3x faster scanning
 
 ### 📖 READ Mode
@@ -331,10 +331,12 @@ Completed! 6 successful, 0 errors.
 ### 🛡️ ENFORCE Mode
 
 **Planning Phase:**
-1. Loads the configuration file and builds lookup tables
-2. Scans all current Start Menu shortcuts
-3. Compares current locations with expected locations
-4. Identifies actions needed:
+1. Scans user Start Menu for shortcuts to migrate to system location
+2. Loads the configuration file and builds lookup tables
+3. Scans all current system Start Menu shortcuts
+4. Compares current locations with expected locations
+5. Identifies actions needed:
+   - **User Migrations**: Shortcuts from user location → system location
    - **Moves**: Shortcuts in wrong folders
    - **Recreations**: Missing shortcuts (uses saved details)
    - **Quarantines**: Unknown shortcuts (not in config)
@@ -342,18 +344,24 @@ Completed! 6 successful, 0 errors.
    - **Folder Cleanups**: Empty folders after moves
 
 **Preview Phase (Manual Mode):**
-- Displays all planned changes with emojis and formatting
+- Displays all planned changes with emojis and color coding
 - Shows before/after locations for moves
 - Asks for user confirmation: `Do you want to proceed with these changes? (Y/N)`
 
+**Backup Phase:**
+- Creates `UserStartMenuBackup_yyyyMMdd_HHmmss.zip` if user changes are planned
+- Creates `SystemStartMenuBackup_yyyyMMdd_HHmmss.zip` if system changes are planned
+- Backups are created AFTER confirmation but BEFORE any changes
+
 **Execution Phase:**
-1. Creates necessary folders
-2. **Moves** shortcuts to correct folders
-3. **Recreates** missing shortcuts with original properties
-4. **Quarantines** unknown shortcuts (with numbered names for duplicates: `app.lnk`, `app (1).lnk`, etc.)
-5. **Deletes** duplicate shortcuts (keeps the one in the correct location)
-6. **Removes** empty folders
-7. Displays results with success/error indicators (✅/❌)
+1. **Migrates** user shortcuts to system location (deletes duplicates)
+2. **Cleans up** empty folders in user Start Menu (preserves `Programs\Startup`)
+3. **Moves** shortcuts to correct folders
+4. **Recreates** missing shortcuts with original properties
+5. **Quarantines** unknown shortcuts (with numbered names for duplicates)
+6. **Deletes** duplicate shortcuts (keeps the one in the correct location)
+7. **Removes** empty folders in system Start Menu
+8. Displays results with success/error indicators (✅/❌)
 
 ## 🏥 Quarantine Folder
 
@@ -465,7 +473,7 @@ $quarantineFolder = "Programs\My Custom Folder"  # Relative to $target
 
 ### Adjust Normalization Rules
 
-Edit the `Normalize_ShortcutName` function (lines 100-122) to customize how shortcuts are matched across versions:
+Edit the `Normalize_ShortcutName` function to customize how shortcuts are matched across versions:
 
 ```powershell
 $n = $name -replace '\s*\((Preview|Beta|Insiders|64-bit|32-bit|x64|x86)\)', '' `
@@ -476,10 +484,7 @@ $n = $name -replace '\s*\((Preview|Beta|Insiders|64-bit|32-bit|x64|x86)\)', '' `
 
 ### Preserve Additional System Folders
 
-Edit line 298 to add folders that should never be deleted:
-```powershell
-$systemFolders = @("Programs\Startup", "Programs\Administrative Tools")
-```
+The script automatically preserves `Programs\Startup` in both user and system locations. To preserve additional folders, modify the `$expectedFolders` set in the `Detect_EmptyFolders` function.
 
 ## ❓ FAQ
 
@@ -506,6 +511,12 @@ A: Yes, as long as PowerShell 5.1+ is installed. The script works on any Windows
 
 **Q: Can I run this on multiple computers with the same config?**  
 A: Yes! Store your config in OneDrive/Dropbox and point all machines to the same file. Great for maintaining consistent organization across devices.
+
+**Q: What happens to shortcuts in my user Start Menu?**  
+A: In ENFORCE mode, the script automatically migrates them to the system-wide Start Menu. If a shortcut already exists in the system location, the user copy is deleted. This consolidates everything into one managed location.
+
+**Q: Are my backups safe if something goes wrong?**  
+A: Yes! Backups are created AFTER you confirm the changes but BEFORE any modifications are made. You can restore by extracting the zip over your Start Menu folder.
 
 ## 📄 License
 
