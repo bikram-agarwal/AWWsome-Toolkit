@@ -30,7 +30,10 @@ $cursorProgIds = Get-ChildItem "Registry::HKEY_CLASSES_ROOT" -ErrorAction Silent
         }
     }
 
-$REG_KEYS += $cursorProgIds
+# Only add ProgIds if they exist (avoid adding $null to the array)
+if ($cursorProgIds) {
+    $REG_KEYS += $cursorProgIds
+}
 Write-Host "Found $($REG_KEYS.Count) registry keys to update" -ForegroundColor Green
 
 # Build the target registry value (what we'll set them to)
@@ -45,6 +48,11 @@ Write-Host "`n$RegValue`n" -ForegroundColor Cyan
 
 $keysWithValues = @()
 foreach ($key in $REG_KEYS) {
+    # Skip null or empty keys
+    if ([string]::IsNullOrWhiteSpace($key)) {
+        continue
+    }
+    
     try {
         $currentValue = (Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue).'(Default)'
         if ($currentValue) {
@@ -141,6 +149,11 @@ $successCount = 0
 $failCount = 0
 
 foreach ($key in $REG_KEYS) {
+    # Skip null or empty keys
+    if ([string]::IsNullOrWhiteSpace($key)) {
+        continue
+    }
+    
     Write-Host "`nProcessing: $key" -ForegroundColor Gray
     
     try {
@@ -190,6 +203,11 @@ Write-Host "`n============================================================="
 Write-Host "  VERIFICATION - Current Registry Values"
 Write-Host "============================================================="
 foreach ($key in $REG_KEYS) {
+    # Skip null or empty keys
+    if ([string]::IsNullOrWhiteSpace($key)) {
+        continue
+    }
+    
     Write-Host "`n$key" -ForegroundColor Yellow
     try {
         $value = (Get-ItemProperty -LiteralPath $key -ErrorAction Stop).'(Default)'
