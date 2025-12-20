@@ -245,7 +245,7 @@ switch ($Phase) {
         Uninstall_XboxPackages
         Write-Host "`n[!] Preparing for auto-resume after reboot..." -ForegroundColor Cyan
         if (Register_ResumeAfterReboot) {
-            Reboot_WithCountdown -Seconds 10
+            Reboot_WithCountdown
         }
         else {
             Write-Host "`n[!] Enabling auto-resume failed. Manually reboot and then manually run script again with Phase = 'Reinstall'." -ForegroundColor Yellow
