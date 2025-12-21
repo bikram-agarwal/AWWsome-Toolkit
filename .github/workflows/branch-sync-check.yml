@@ -8,6 +8,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0  # Fetch all history
           
       - name: Fetch base branch
@@ -16,14 +17,14 @@ jobs:
           
       - name: Check if branch is up to date
         run: |
-          # Get the merge base
+          # Get commits to compare
           MERGE_BASE=$(git merge-base HEAD origin/${{ github.base_ref }})
-          BASE_HEAD=$(git rev-parse origin/${{ github.base_ref }})
+          TARGET_LATEST=$(git rev-parse origin/${{ github.base_ref }})
           
-          echo "Merge base: $MERGE_BASE"
-          echo "Base branch HEAD: $BASE_HEAD"
+          echo "Common ancestor: $MERGE_BASE"
+          echo "Target branch latest: $TARGET_LATEST"
           
-          if [ "$MERGE_BASE" != "$BASE_HEAD" ]; then
+          if [ "$MERGE_BASE" != "$TARGET_LATEST" ]; then
             echo "❌ Branch is out of sync with ${{ github.base_ref }}"
             echo "Please update your branch before merging."
             exit 1
