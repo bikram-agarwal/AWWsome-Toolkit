@@ -116,8 +116,7 @@ function syncCalendarAndTasks(startDate, endDate) {
     if (task.status === 'completed') {
       phaseChanges++;
       if (!ev) {
-        // Task Completed + No Event (Manual / Orphan Task) -> Let Bulk Clear handle deletion
-        deleted++;
+        // Task Completed + No Event (Manual / Orphan Task) -> Deleted in final cleanup loop
         logAction(`🗑️ DELETE completed orphan task: ${task.title}`, actions);
         addPhase2Entry(phase2Data, task, '✅ Done → 🗑️ Deleted', null, '—');
       } else if (normalizeColor(ev.getColor()) === UNWATCHED_COLOR_ID) {
@@ -155,12 +154,12 @@ function syncCalendarAndTasks(startDate, endDate) {
       continue;
     }
 
-    // Incomplete Task + Event Watched/Default -> Mark as Completed for Bulk Clear
+    // Incomplete Task + Event Watched/Default -> Mark as Completed for deletion
     phaseChanges++;
     try {
       const updatedTask = { id: task.id, status: 'completed' };
       Tasks.Tasks.update(updatedTask, taskList.id);
-      markedCompleted++; deleted++;
+      markedCompleted++;
       logAction(`🗑️ DELETE (event watched): ${task.title}`, actions);
       addPhase2Entry(phase2Data, task, '✓ Watched → 🗑️ Deleted', ev, '✓ Watched');
     } catch (e) {
