@@ -48,9 +48,10 @@ function syncCalendarAndTasks(startDate, endDate) {
     return "⚠️ Calendar not found";
   }
 
-  // Log the actual date range being used
+  // Log the actual date range being used (format in local timezone to match user's selection)
+  const formatLocalDate = (date) => Utilities.formatDate(date, SCRIPT_TIME_ZONE, 'yyyy-MM-dd');
   logAction("📆 FETCHING CALENDAR EVENTS", null, true);
-  logAction(`Date range: ${aWhileAgo.toISOString()} to ${today.toISOString()}`);
+  logAction(`Date range: ${formatLocalDate(aWhileAgo)} to ${formatLocalDate(today)}`);
   
   const events = calendar.getEvents(aWhileAgo, today, { max: 2000, futureEvents: false });
   logAction(`Found ${events.length} events in range`);
