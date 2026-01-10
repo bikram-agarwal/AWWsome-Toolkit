@@ -10,25 +10,34 @@ const SCRIPT_TIME_ZONE = Session.getScriptTimeZone();
 
 function syncCalendarAndTasks(startDate, endDate) {
   // Helper to parse date string in local timezone (avoid UTC conversion)
+  // Returns null if parsing fails
   const parseDate = (dateInput) => {
-    // If already a Date object, return it
+    if (!dateInput) return null;
+    
+    // If already a Date object, check if valid
     if (dateInput instanceof Date) {
-      return dateInput;
+      return isNaN(dateInput.getTime()) ? null : dateInput;
     }
-    // If string, parse it
-    if (typeof dateInput === 'string') {
+    
+    // If string with date format, parse it
+    if (typeof dateInput === 'string' && dateInput.includes('-')) {
       const parts = dateInput.split('-');
-      return new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+      if (parts.length === 3) {
+        const parsed = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+        return isNaN(parsed.getTime()) ? null : parsed;
+      }
     }
-    // Fallback: try to create Date from whatever was passed
-    return new Date(dateInput);
+    
+    return null;
   };
   
-  // Use provided dates or default to last 6 months
-  const today = endDate ? parseDate(endDate) : new Date();
-  const aWhileAgo = startDate ? parseDate(startDate) : (() => {
+  // Parse provided dates, fall back to defaults if invalid/missing
+  const parsedEnd = parseDate(endDate);
+  const parsedStart = parseDate(startDate);
+  
+  const today = parsedEnd || new Date();
+  const aWhileAgo = parsedStart || (() => {
     const date = new Date();
-    //date.setDate(date.getDate() - 10);
     date.setMonth(date.getMonth() - 6);
     return date;
   })();
@@ -39,8 +48,12 @@ function syncCalendarAndTasks(startDate, endDate) {
     return "⚠️ Calendar not found";
   }
 
-  const events = calendar.getEvents(aWhileAgo, today, { max: 2000, futureEvents: false });
+  // Log the actual date range being used (format in local timezone to match user's selection)
+  const formatLocalDate = (date) => Utilities.formatDate(date, SCRIPT_TIME_ZONE, 'yyyy-MM-dd');
   logAction("📆 FETCHING CALENDAR EVENTS", null, true);
+  logAction(`Date range: ${formatLocalDate(aWhileAgo)} to ${formatLocalDate(today)}`);
+  
+  const events = calendar.getEvents(aWhileAgo, today, { max: 2000, futureEvents: false });
   logAction(`Found ${events.length} events in range`);
   events.forEach(ev => {
     const color = normalizeColor(ev.getColor());
@@ -104,8 +117,7 @@ function syncCalendarAndTasks(startDate, endDate) {
     if (task.status === 'completed') {
       phaseChanges++;
       if (!ev) {
-        // Task Completed + No Event (Manual / Orphan Task) -> Let Bulk Clear handle deletion
-        deleted++;
+        // Task Completed + No Event (Manual / Orphan Task) -> Deleted in final cleanup loop
         logAction(`🗑️ DELETE completed orphan task: ${task.title}`, actions);
         addPhase2Entry(phase2Data, task, '✅ Done → 🗑️ Deleted', null, '—');
       } else if (normalizeColor(ev.getColor()) === UNWATCHED_COLOR_ID) {
@@ -143,12 +155,12 @@ function syncCalendarAndTasks(startDate, endDate) {
       continue;
     }
 
-    // Incomplete Task + Event Watched/Default -> Mark as Completed for Bulk Clear
+    // Incomplete Task + Event Watched/Default -> Mark as Completed for deletion
     phaseChanges++;
     try {
       const updatedTask = { id: task.id, status: 'completed' };
       Tasks.Tasks.update(updatedTask, taskList.id);
-      markedCompleted++; deleted++;
+      markedCompleted++;
       logAction(`🗑️ DELETE (event watched): ${task.title}`, actions);
       addPhase2Entry(phase2Data, task, '✓ Watched → 🗑️ Deleted', ev, '✓ Watched');
     } catch (e) {
@@ -156,18 +168,23 @@ function syncCalendarAndTasks(startDate, endDate) {
     }
   }
   
-  // Clear all completed tasks in bulk
-  const completedBeforeRun = tasks.filter(t => t.status === 'completed').length;
-  deleted = completedBeforeRun + markedCompleted;
-
-  if (deleted > 0) {
-    try {
-      // This API call clears all tasks with status='completed' in the list.
-      Tasks.Tasks.clear(taskList.id);
-      logAction(`🧹 BULK CLEARED all completed tasks (Approx. ${deleted} total deletions)`, actions);
-    } catch (e) {
-      logAction(`⚠️ FAILED to bulk clear completed tasks!`, actions);
+  // Delete completed tasks individually (bulk clear only hides, doesn't permanently delete)
+  // Re-fetch tasks to get updated statuses after marking some as completed above
+  const refreshedTasks = listAllTasks(taskList.id);
+  const tasksToDelete = refreshedTasks.filter(t => t.status === 'completed');
+  
+  let successfulDeletions = 0;
+  if (tasksToDelete.length > 0) {
+    logAction(`🧹 Deleting ${tasksToDelete.length} completed tasks...`, actions);
+    for (const task of tasksToDelete) {
+      if (deleteTask(taskList.id, task)) {
+        successfulDeletions++;
+      } else {
+        logAction(`⚠️ Failed to delete task: ${task.title}`, actions);
+      }
     }
+    deleted = successfulDeletions;
+    logAction(`✅ Successfully deleted ${successfulDeletions} tasks`, actions);
   }
 
   ifNoChange(phaseChanges + markedCompleted, actions);

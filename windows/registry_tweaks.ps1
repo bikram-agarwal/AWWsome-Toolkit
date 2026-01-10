@@ -34,6 +34,15 @@ $tweaks = @(
         }
     },
     @{
+        Name = "Remove Linux from File Explorer"
+        Description = "Removes Linux from Windows File Explorer navigation tree"
+        Action = {
+            $clsidPath = "HKCU:\Software\Classes\CLSID\{B2B4A4D1-2754-4140-A2EB-9A76D9D7CDC6}"
+            if (!(Test-Path $clsidPath)) { New-Item -Path $clsidPath -Force | Out-Null }
+            Set-ItemProperty -Path $clsidPath -Name "System.IsPinnedToNameSpaceTree" -Value 0 -Type DWord
+        }
+    },
+    @{
         Name = "Remove AMD from Context Menu"
         Description = "Removes AMD from context menu"
         Action = {
