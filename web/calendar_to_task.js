@@ -159,12 +159,12 @@ function syncCalendarAndTasks(startDate, endDate) {
     phaseChanges++;
     try {
       const updatedTask = { id: task.id, status: 'completed' };
-      Tasks.Tasks.update(updatedTask, taskList.id);
+      Tasks.Tasks.patch(updatedTask, taskList.id, task.id);
       markedCompleted++;
       logAction(`🗑️ DELETE (event watched): ${task.title}`, actions);
       addPhase2Entry(phase2Data, task, '✓ Watched → 🗑️ Deleted', ev, '✓ Watched');
     } catch (e) {
-      logAction(`⚠️ Failed marking task (event watched) as completed: ${task.title}`, actions);
+      logAction(`⚠️ Failed marking task (event watched) as completed: ${task.title}: ${e.message}`, actions);
     }
   }
   
