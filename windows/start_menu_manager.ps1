@@ -271,10 +271,11 @@ function Calculate_ConfigDiff {
     # Show added/removed folders
     @{Items = @($newFolders | Where-Object { $_ -notin $oldFolders }); Label = "NEW FOLDERS"; Prefix = "+"; Color = "Green"},
     @{Items = @($oldFolders | Where-Object { $_ -notin $newFolders }); Label = "REMOVED FOLDERS"; Prefix = "-"; Color = "Red"} | ForEach-Object {
-        if ($_.Items.Count -gt 0) {
+        $group = $_
+        if ($group.Items.Count -gt 0) {
             $changesFound = $true
-            Write_Log "$($_.Label) ($($_.Items.Count)):" -Color $_.Color -ToScreen
-            $_.Items | Sort-Object | ForEach-Object { Write_Log "  $($args[0].Prefix) $_" -Color $args[0].Color -ToScreen } -ArgumentList $_
+            Write_Log "$($group.Label) ($($group.Items.Count)):" -Color $group.Color -ToScreen
+            $group.Items | Sort-Object | ForEach-Object { Write_Log "  $($group.Prefix) $_" -Color $group.Color -ToScreen }
             Write-Host ""
         }
     }
