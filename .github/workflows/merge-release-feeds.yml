@@ -21,7 +21,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - run: python web/rss/merge_release_feeds.py
+      - run: python web/merge_release_feeds.py
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
