@@ -213,8 +213,15 @@ Write-Host "============================================" -ForegroundColor Magen
 
 # Auto-elevate to Administrator if needed
 if (-not (Test_Administrator)) {
-    Write-Host "`n[!] Elevating to Administrator..." -ForegroundColor Yellow
-    Start-Process $PsExe -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+    $elevateArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath)
+    if ($Resume) { $elevateArgs += '-Resume' }
+    $sudoCmd = Get-Command sudo -ErrorAction SilentlyContinue
+    if ($sudoCmd) {
+        & sudo $PsExe @elevateArgs
+        exit
+    }
+    Write-Host "`n[!] Sudo is not enabled. Enable it in Settings > System > Advanced for same-window elevation. Elevating in a new window..." -ForegroundColor Yellow
+    Start-Process $PsExe -Verb RunAs -ArgumentList $elevateArgs
     exit
 }
 

@@ -10,13 +10,19 @@
 
 # Check if running as admin, if not, elevate
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Host "Elevating to administrator..." -ForegroundColor Yellow
+    $elevateArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath)
+    $sudoCmd = Get-Command sudo -ErrorAction SilentlyContinue
+    if ($sudoCmd) {
+        & sudo pwsh.exe @elevateArgs
+        exit
+    }
+    Write-Host "Sudo is not enabled. Enable it in Settings > System > Advanced for same-window elevation. Elevating in a new window..." -ForegroundColor Yellow
     $wtPath = Get-Command wt.exe -ErrorAction SilentlyContinue
     if ($wtPath) {
         $wtArgs = "new-tab --title `"ViVeTool Script`" pwsh.exe -NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
         Start-Process wt.exe -ArgumentList $wtArgs -Verb RunAs
     } else {
-        Start-Process pwsh.exe -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-File","`"$PSCommandPath`"" -Verb RunAs
+        Start-Process pwsh.exe -ArgumentList $elevateArgs -Verb RunAs
     }
     exit
 }
