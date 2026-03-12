@@ -1279,17 +1279,17 @@ while ($true) {
         $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
         
         if (-not $isAdmin) {
-            Write-Host "Administrator privileges required. Elevating..." -ForegroundColor Yellow
-            
-            # Detect current PowerShell executable
             $psExe = if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh.exe' } else { 'powershell.exe' }
-            
-            # Build arguments - pass the current mode so elevated window doesn't show menu
             $scriptArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-Mode', $currentMode)
-            
-            # Elevate PowerShell (opens in new window, runs in the selected mode with preview)
+            if ($Auto) { $scriptArgs += '-Auto' }
+
+            $sudoCmd = Get-Command sudo -ErrorAction SilentlyContinue
+            if ($sudoCmd) {
+                & sudo $psExe @scriptArgs
+                exit 0
+            }
+            Write-Host "Sudo is not enabled. Enable it in Settings > System > Advanced for same-window elevation. Elevating in a new window..." -ForegroundColor Yellow
             Start-Process $psExe -ArgumentList $scriptArgs -Verb RunAs
-            
             exit 0
         }
     }
