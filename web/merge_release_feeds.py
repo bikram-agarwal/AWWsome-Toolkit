@@ -13,8 +13,10 @@ import json
 import os
 import re
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from http.client import IncompleteRead
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -28,13 +30,19 @@ MAX_ENTRIES_ALL = 300
 FEED_FETCH_WORKERS = 20
 RELEASES_PAGE_SIZE = 50
 RELEASES_PAGES_PER_REPO = 1
+GITHUB_API_RETRIES = 3
+GITHUB_API_RETRY_DELAY_SEC = 2
+RETRYABLE_HTTP_CODES = (429, 500, 502, 503, 504)
 OUTPUT_DIR = Path("_site/feeds")
 
 ET.register_namespace("", ATOM_NS)
 
 
 def github_api_get(url):
-    """Fetch a GitHub API endpoint, using GITHUB_TOKEN for higher rate limits."""
+    """Fetch a GitHub API endpoint, using GITHUB_TOKEN for higher rate limits.
+    Retries on transient errors: IncompleteRead, connection/timeout errors,
+    and HTTP 429/5xx.
+    """
     headers = {
         "Accept": "application/vnd.github.v3+json",
         "User-Agent": "merge-release-feeds",
@@ -42,8 +50,23 @@ def github_api_get(url):
     token = os.environ.get("GITHUB_TOKEN")
     if token:
         headers["Authorization"] = f"token {token}"
-    with urlopen(Request(url, headers=headers), timeout=30) as response:
-        return json.loads(response.read().decode())
+    last_error = None
+    for attempt in range(GITHUB_API_RETRIES):
+        try:
+            with urlopen(Request(url, headers=headers), timeout=30) as response:
+                return json.loads(response.read().decode())
+        except HTTPError as err:
+            last_error = err
+            if err.code in RETRYABLE_HTTP_CODES and attempt < GITHUB_API_RETRIES - 1:
+                time.sleep(GITHUB_API_RETRY_DELAY_SEC)
+            else:
+                raise last_error
+        except (IncompleteRead, URLError, ConnectionError, TimeoutError) as err:
+            last_error = err
+            if attempt < GITHUB_API_RETRIES - 1:
+                time.sleep(GITHUB_API_RETRY_DELAY_SEC)
+            else:
+                raise last_error
 
 
 def web_get(url):
@@ -147,7 +170,13 @@ def fetch_releases_api(repo):
             releases.extend(batch)
             if len(batch) < RELEASES_PAGE_SIZE:
                 break
-    except (HTTPError, URLError) as err:
+    except (
+        HTTPError,
+        URLError,
+        IncompleteRead,
+        ConnectionError,
+        TimeoutError,
+    ) as err:
         print(f"    Warning: {repo} - {err}")
         return repo, []
     return repo, releases
