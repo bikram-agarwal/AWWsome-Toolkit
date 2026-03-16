@@ -8,6 +8,7 @@ Output: _site/feeds/*.atom + _site/index.html
 """
 
 import copy
+import html
 import json
 import os
 import re
@@ -25,6 +26,8 @@ ATOM_NS = "http://www.w3.org/2005/Atom"
 MAX_ENTRIES_PER_CATEGORY = 200
 MAX_ENTRIES_ALL = 300
 FEED_FETCH_WORKERS = 20
+RELEASES_PAGE_SIZE = 50
+RELEASES_PAGES_PER_REPO = 1
 OUTPUT_DIR = Path("_site/feeds")
 
 ET.register_namespace("", ATOM_NS)
@@ -126,32 +129,62 @@ def discover_lists_and_repos(starred_set):
     return categories
 
 
-def fetch_release_feed(repo):
-    """Fetch a single repo's releases.atom feed. Returns (repo, xml_text | None)."""
+def fetch_releases_api(repo):
+    """Fetch recent releases for a repo via GitHub API (releases only, no tag-only).
+    Only fetches the first N pages (newest first) to avoid scanning hundreds of
+    releases per repo. Returns (repo, list of release dicts).
+    """
+    releases = []
     try:
-        return repo, web_get(f"https://github.com/{repo}/releases.atom")
+        for page in range(1, RELEASES_PAGES_PER_REPO + 1):
+            api_url = (
+                f"https://api.github.com/repos/{repo}/releases"
+                f"?per_page={RELEASES_PAGE_SIZE}&page={page}"
+            )
+            batch = github_api_get(api_url)
+            if not batch:
+                break
+            releases.extend(batch)
+            if len(batch) < RELEASES_PAGE_SIZE:
+                break
     except (HTTPError, URLError) as err:
         print(f"    Warning: {repo} - {err}")
-        return repo, None
+        return repo, []
+    return repo, releases
 
 
-def parse_feed_entries(repo, xml_text):
-    """Parse Atom XML into a list of <entry> Elements with repo-prefixed titles."""
-    if not xml_text:
-        return []
-    try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError as err:
-        print(f"    Warning: parse error for {repo} - {err}")
-        return []
+def release_to_atom_entry(repo, release):
+    """Build one Atom <entry> Element from a GitHub API release dict."""
+    entry = ET.Element(f"{{{ATOM_NS}}}entry")
+    tag_name = release.get("tag_name", "")
+    html_url = release.get("html_url", f"https://github.com/{repo}/releases/tag/{tag_name}")
+    node_id = release.get("node_id", "")
+    entry_id = f"tag:github.com,2008:Repository/{node_id}/{tag_name}" if node_id else html_url
+    ET.SubElement(entry, f"{{{ATOM_NS}}}id").text = entry_id
+    updated = release.get("published_at") or release.get("created_at", "")
+    if updated:
+        ET.SubElement(entry, f"{{{ATOM_NS}}}updated").text = updated
+    link = ET.SubElement(entry, f"{{{ATOM_NS}}}link")
+    link.set("rel", "alternate")
+    link.set("type", "text/html")
+    link.set("href", html_url)
+    title = release.get("name") or tag_name
+    ET.SubElement(entry, f"{{{ATOM_NS}}}title").text = f"{repo}: {title}"
+    body = release.get("body") or ""
+    content_elem = ET.SubElement(entry, f"{{{ATOM_NS}}}content")
+    content_elem.set("type", "html")
+    content_elem.text = f"<p>{html.escape(body)}</p>" if body else ""
+    author = ET.SubElement(entry, f"{{{ATOM_NS}}}author")
+    author_login = "unknown"
+    if release.get("author") and isinstance(release["author"], dict):
+        author_login = release["author"].get("login", author_login)
+    ET.SubElement(author, f"{{{ATOM_NS}}}name").text = author_login
+    return entry
 
-    entries = []
-    for entry in root.findall(f"{{{ATOM_NS}}}entry"):
-        title_elem = entry.find(f"{{{ATOM_NS}}}title")
-        if title_elem is not None and title_elem.text:
-            title_elem.text = f"{repo}: {title_elem.text}"
-        entries.append(entry)
-    return entries
+
+def releases_to_entries(repo, releases):
+    """Convert API release list to Atom entry Elements with repo-prefixed titles."""
+    return [release_to_atom_entry(repo, release) for release in releases]
 
 
 def entry_updated_key(entry):
@@ -248,15 +281,15 @@ def main():
         categories["uncategorized"] = {"name": "Uncategorized", "repos": uncategorized_repos}
     print(f"  {len(uncategorized_repos)} uncategorized repos\n")
 
-    print(f"=== Step 3: Fetch release feeds ({len(starred_repos)} repos) ===")
+    print(f"=== Step 3: Fetch releases via API ({len(starred_repos)} repos) ===")
     repo_entries = {}
     with ThreadPoolExecutor(max_workers=FEED_FETCH_WORKERS) as pool:
         futures = {
-            pool.submit(fetch_release_feed, repo): repo for repo in starred_repos
+            pool.submit(fetch_releases_api, repo): repo for repo in starred_repos
         }
         for future in as_completed(futures):
-            repo, xml_text = future.result()
-            repo_entries[repo] = parse_feed_entries(repo, xml_text)
+            repo, releases = future.result()
+            repo_entries[repo] = releases_to_entries(repo, releases)
 
     total_entries = sum(len(entry_list) for entry_list in repo_entries.values())
     print(f"  Parsed {total_entries} entries total\n")
