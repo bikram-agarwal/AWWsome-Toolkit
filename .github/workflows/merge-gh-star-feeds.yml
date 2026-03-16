@@ -25,9 +25,16 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: feed-output
+          path: _site
+
       - uses: actions/upload-pages-artifact@v3
+        if: github.ref == 'refs/heads/main'
         with:
           path: _site
 
       - id: deploy
         uses: actions/deploy-pages@v4
+        if: github.ref == 'refs/heads/main'
