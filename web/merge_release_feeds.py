@@ -44,7 +44,7 @@ def github_api_get(url):
     and HTTP 429/5xx.
     """
     headers = {
-        "Accept": "application/vnd.github.v3+json",
+        "Accept": "application/vnd.github.v3.html+json",
         "User-Agent": "merge-release-feeds",
     }
     token = os.environ.get("GITHUB_TOKEN")
@@ -199,10 +199,12 @@ def release_to_atom_entry(repo, release):
     link.set("href", html_url)
     title = release.get("name") or tag_name
     ET.SubElement(entry, f"{{{ATOM_NS}}}title").text = f"{repo}: {title}"
-    body = release.get("body") or ""
+    body_html = release.get("body_html") or ""
+    if not body_html and release.get("body"):
+        body_html = f"<p>{html.escape(release['body'])}</p>"
     content_elem = ET.SubElement(entry, f"{{{ATOM_NS}}}content")
     content_elem.set("type", "html")
-    content_elem.text = f"<p>{html.escape(body)}</p>" if body else ""
+    content_elem.text = body_html
     author = ET.SubElement(entry, f"{{{ATOM_NS}}}author")
     author_login = "unknown"
     if release.get("author") and isinstance(release["author"], dict):
