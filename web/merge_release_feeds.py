@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from http.client import IncompleteRead
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree as ET
 
@@ -202,9 +203,84 @@ def release_to_atom_entry(repo, release):
     body_html = release.get("body_html") or ""
     if not body_html and release.get("body"):
         body_html = f"<p>{html.escape(release['body'])}</p>"
+
+    repo_page_url = f"https://github.com/{repo}"
+    metadata_parts = [
+        f'<a href="{html.escape(repo_page_url, quote=True)}">'
+        f"Repository: {html.escape(repo)}</a>"
+    ]
+    if tag_name:
+        tag_page_url = (
+            f"https://github.com/{repo}/releases/tag/{quote(tag_name, safe='')}"
+        )
+        metadata_parts.append(
+            f'<a href="{html.escape(tag_page_url, quote=True)}">'
+            f"Tag: {html.escape(tag_name)}</a>"
+        )
+    target_commitish = release.get("target_commitish") or ""
+    if target_commitish:
+        if re.fullmatch(r"[0-9a-f]{7,40}", target_commitish, re.IGNORECASE):
+            commit_url = f"https://github.com/{repo}/commit/{target_commitish}"
+            metadata_parts.append(
+                f'<a href="{html.escape(commit_url, quote=True)}">'
+                f"Commit: {html.escape(target_commitish)}</a>"
+            )
+        else:
+            metadata_parts.append(f"Commit: {html.escape(target_commitish)}")
+    author_dict = release.get("author") if isinstance(release.get("author"), dict) else None
+    if author_dict:
+        author_login = author_dict.get("login") or ""
+        author_profile_url = author_dict.get("html_url") or ""
+        if author_login and author_profile_url:
+            metadata_parts.append(
+                "Released by: "
+                f'<a href="{html.escape(author_profile_url, quote=True)}">'
+                f"{html.escape(author_login)}</a>"
+            )
+        elif author_login:
+            metadata_parts.append(f"Released by: {html.escape(author_login)}")
+    metadata_html = "<p>" + " · ".join(metadata_parts) + "</p><hr />"
+
+    uploaded_assets = release.get("assets") or []
+    zipball_url = release.get("zipball_url") or ""
+    tarball_url = release.get("tarball_url") or ""
+    asset_count = len(uploaded_assets) + (1 if zipball_url else 0) + (1 if tarball_url else 0)
+    assets_suffix_html = ""
+    if asset_count:
+        list_items_html = []
+        for asset in uploaded_assets:
+            asset_name = asset.get("name") or "asset"
+            download_url = asset.get("browser_download_url") or ""
+            if download_url:
+                list_items_html.append(
+                    f'<li><a href="{html.escape(download_url, quote=True)}">'
+                    f"{html.escape(asset_name)}</a></li>"
+                )
+            else:
+                list_items_html.append(f"<li>{html.escape(asset_name)}</li>")
+        if zipball_url:
+            list_items_html.append(
+                f'<li><a href="{html.escape(zipball_url, quote=True)}">'
+                "Source code (zip)</a></li>"
+            )
+        if tarball_url:
+            list_items_html.append(
+                f'<li><a href="{html.escape(tarball_url, quote=True)}">'
+                "Source code (tar.gz)</a></li>"
+            )
+        asset_word = "asset" if asset_count == 1 else "assets"
+        assets_suffix_html = (
+            "<hr /><p>"
+            f"This release has {asset_count} {asset_word}:</p><ul>"
+            + "".join(list_items_html)
+            + "</ul><p>"
+            f'<a href="{html.escape(html_url, quote=True)}">Visit the release page</a> '
+            "to download them.</p>"
+        )
+
     content_elem = ET.SubElement(entry, f"{{{ATOM_NS}}}content")
     content_elem.set("type", "html")
-    content_elem.text = body_html
+    content_elem.text = metadata_html + body_html + assets_suffix_html
     author = ET.SubElement(entry, f"{{{ATOM_NS}}}author")
     author_login = "unknown"
     if release.get("author") and isinstance(release["author"], dict):
