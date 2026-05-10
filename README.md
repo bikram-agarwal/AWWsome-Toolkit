@@ -56,6 +56,18 @@ Comprehensive system cleanup tool and documentation for reclaiming disk space sa
   - Windows Installer orphans
   - System restore points management
 
+### Additional Windows Tools
+Focused scripts for everyday maintenance, setup, repair, and power-user customization.
+
+- **Android Dev Environment**: [`android_dev_env.ps1`](windows/android_dev_env.ps1) installs Android command-line tools, platform tools, build tools, SDK packages, environment variables, and Flutter browser configuration without requiring Android Studio.
+- **Application Inventory**: [`app_list.ps1`](windows/app_list.ps1) exports installed Win32 and Microsoft Store apps to timestamped CSV files, plus a summary report for audits, rebuilds, or migration planning.
+- **Folder Icon Setter**: [`set_folder_icons.ps1`](windows/set_folder_icons.ps1) scans portable app folders, detects the main executable, and applies that executable's icon to the folder for easier visual browsing.
+- **Shortcut Path Updater**: [`update_shortcut_drive.ps1`](windows/update_shortcut_drive.ps1) repairs `.lnk` targets and working directories after moving tools from one drive or base path to another.
+- **Xbox Reset**: [`xbox_reset.ps1`](windows/xbox_reset.ps1) removes and reinstalls Xbox, Game Bar, Xbox Identity Provider, and Gaming Services packages to fix broken Xbox or Game Pass installs.
+- **Registry Tweaks Menu**: [`registry_tweaks.ps1`](windows/registry_tweaks.ps1) provides a selectable menu for opinionated Windows tweaks such as Admin Protection, Explorer cleanup, context-menu cleanup, and PowerShell launch shortcuts.
+- **ViVeTool Feature Toggles**: [`VibeToolScript.ps1`](windows/VibeToolScript.ps1) wraps common ViVeTool feature IDs behind named enable, disable, query, and list commands, with build-aware logging.
+- **GIF to Video**: [`gif_to_vid.ps1`](windows/gif_to_vid.ps1) batch-converts GIF files to WebM, MP4, or both, then reports original size, converted size, and space saved.
+
 ## 🌐 Web
 
 ### Calendar to Task Sync

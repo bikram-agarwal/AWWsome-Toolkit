@@ -177,11 +177,161 @@ function Refresh-Explorer {
     }
 }
 
+# Function to print folders in a terminal-width-aware grid
+function Show-FolderGrid {
+    param(
+        [array]$Folders
+    )
+
+    $terminalWidth = 80
+    try {
+        $terminalWidth = [Math]::Max(40, $Host.UI.RawUI.WindowSize.Width)
+    }
+    catch {
+        # Some hosts do not expose a window size.
+    }
+
+    $folderCount = $Folders.Count
+    $indexWidth = $folderCount.ToString().Length
+    $folderLabels = @()
+
+    for ($folderIndex = 0; $folderIndex -lt $folderCount; $folderIndex++) {
+        $folderLabels += ("{0,$indexWidth}. {1}" -f ($folderIndex + 1), $Folders[$folderIndex].Name)
+    }
+
+    $longestLabelLength = ($folderLabels | ForEach-Object { $_.Length } | Measure-Object -Maximum).Maximum
+    $preferredCellWidth = [Math]::Min([Math]::Max($longestLabelLength + 2, 20), 42)
+    $columnCount = [Math]::Max(1, [Math]::Floor($terminalWidth / $preferredCellWidth))
+    $columnCount = [Math]::Min($columnCount, $folderCount)
+    $cellWidth = [Math]::Max(20, [Math]::Floor($terminalWidth / $columnCount))
+    $rowCount = [Math]::Ceiling($folderCount / $columnCount)
+
+    for ($rowIndex = 0; $rowIndex -lt $rowCount; $rowIndex++) {
+        $rowCells = @()
+
+        for ($columnIndex = 0; $columnIndex -lt $columnCount; $columnIndex++) {
+            $folderIndex = ($rowIndex * $columnCount) + $columnIndex
+
+            if ($folderIndex -lt $folderCount) {
+                $cellText = $folderLabels[$folderIndex]
+                $contentWidth = $cellWidth - 2
+
+                if ($cellText.Length -gt $contentWidth) {
+                    $trimmedWidth = [Math]::Max(1, $contentWidth - 3)
+                    $cellText = $cellText.Substring(0, $trimmedWidth) + "..."
+                }
+
+                $rowCells += $cellText.PadRight($cellWidth)
+            }
+        }
+
+        Write-Host ($rowCells -join "") -ForegroundColor Green
+    }
+}
+
+# Function to parse folder selections like "1 3 5" or "1-4 9"
+function Resolve-FolderSelection {
+    param(
+        [string]$Selection,
+        [int]$FolderCount
+    )
+
+    $selectedIndices = [System.Collections.Generic.List[int]]::new()
+    $invalidSelections = @()
+    $selectionParts = $Selection -split '\s+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+    foreach ($selectionPart in $selectionParts) {
+        if ($selectionPart -match '^(\d+)-(\d+)$') {
+            $rangeStart = [int]$Matches[1]
+            $rangeEnd = [int]$Matches[2]
+
+            if ($rangeStart -lt 1 -or $rangeEnd -gt $FolderCount -or $rangeStart -gt $rangeEnd) {
+                $invalidSelections += $selectionPart
+                continue
+            }
+
+            for ($folderNumber = $rangeStart; $folderNumber -le $rangeEnd; $folderNumber++) {
+                if (-not $selectedIndices.Contains($folderNumber)) {
+                    $selectedIndices.Add($folderNumber)
+                }
+            }
+        }
+        elseif ($selectionPart -match '^\d+$') {
+            $folderNumber = [int]$selectionPart
+
+            if ($folderNumber -lt 1 -or $folderNumber -gt $FolderCount) {
+                $invalidSelections += $selectionPart
+                continue
+            }
+
+            if (-not $selectedIndices.Contains($folderNumber)) {
+                $selectedIndices.Add($folderNumber)
+            }
+        }
+        else {
+            $invalidSelections += $selectionPart
+        }
+    }
+
+    return [PSCustomObject]@{
+        Indices = @($selectedIndices)
+        InvalidSelections = $invalidSelections
+    }
+}
+
+# Function to print a clear ASCII banner for major sections
+function Show-Banner {
+    param(
+        [string]$Title
+    )
+
+    $terminalWidth = 80
+    try {
+        $terminalWidth = [Math]::Max(70, $Host.UI.RawUI.WindowSize.Width)
+    }
+    catch {
+        # Some hosts do not expose a window size.
+    }
+
+    $bannerWidth = $terminalWidth - 2
+    $innerWidth = $bannerWidth - 2
+    $borderLine = "=" * $bannerWidth
+    $titleText = " $($Title.ToUpperInvariant()) "
+
+    if ($titleText.Length -gt $innerWidth) {
+        $titleText = $titleText.Substring(0, $innerWidth)
+    }
+
+    $leftPadding = [Math]::Floor(($innerWidth - $titleText.Length) / 2)
+    $rightPadding = $innerWidth - $titleText.Length - $leftPadding
+    $titleLine = "=" + (" " * $leftPadding) + $titleText + (" " * $rightPadding) + "="
+
+    Write-Host ""
+    Write-Host $borderLine -ForegroundColor Cyan
+    Write-Host $titleLine -ForegroundColor Cyan
+    Write-Host $borderLine -ForegroundColor Cyan
+}
+
+# Function to print metadata with aligned separators
+function Show-MetadataLine {
+    param(
+        [string]$Label,
+        [string]$Value,
+        [ConsoleColor]$ValueColor = [ConsoleColor]::White
+    )
+
+    $labelWidth = 20
+    $metadataPrefix = $Label.PadRight($labelWidth) + " : "
+
+    Write-Host $metadataPrefix -NoNewline -ForegroundColor White
+    Write-Host $Value -ForegroundColor $ValueColor
+}
+
 # Main script
 function Main {
     # If no target path provided, prompt for it
     if ([string]::IsNullOrWhiteSpace($TARGET_PATH)) {
-        Write-Host "`n=== Folder Icon Setter ===" -ForegroundColor Cyan
+        Show-Banner -Title "Folder Icon Setter"
         Write-Host "No target path specified.`n" -ForegroundColor Yellow
         
         # Use GUI only if explicitly requested
@@ -230,26 +380,48 @@ function Main {
         return
     }
     
-    Write-Host "`n=== Folder Icon Setter ===" -ForegroundColor Cyan
-    Write-Host "Target Path: $TARGET_PATH" -ForegroundColor White
-    Write-Host "Mode: " -NoNewline
+    Show-Banner -Title "Folder Icon Setter"
+    Write-Host "This tool can set custom folder icons using the app executable inside each folder." -ForegroundColor White
+    Write-Host "It will not move or delete your files, and you can review folders before changes are made.`n" -ForegroundColor White
+    Show-MetadataLine -Label "Working folder" -Value $TARGET_PATH
     if ($MODE -eq "remove") {
-        Write-Host "REMOVE custom icons" -ForegroundColor Red
+        Show-MetadataLine -Label "Action" -Value "remove custom folder icons" -ValueColor Yellow
     }
     else {
-        Write-Host "SET custom icons" -ForegroundColor Green
+        Show-MetadataLine -Label "Action" -Value "set custom folder icons" -ValueColor Green
     }
-    Write-Host "Recursive: $PROCESS_RECURSIVE" -ForegroundColor White
-    Write-Host "Interactive select: $INTERACTIVE_SELECT" -ForegroundColor White
-    Write-Host "Confirm each: $CONFIRM_EACH`n" -ForegroundColor White
+    if ($PROCESS_RECURSIVE) {
+        Show-MetadataLine -Label "Scanning" -Value "this folder and all subfolders"
+    }
+    else {
+        Show-MetadataLine -Label "Scanning" -Value "only folders directly inside $TARGET_PATH"
+    }
+    if ($INTERACTIVE_SELECT) {
+        Show-MetadataLine -Label "Folder choice" -Value "you can choose which folders to process"
+    }
+    else {
+        Show-MetadataLine -Label "Folder choice" -Value "every found folder will be processed"
+    }
+    if ($MODE -eq "remove") {
+        Show-MetadataLine -Label "Before each change" -Value "selected custom icons will be removed automatically"
+    }
+    elseif ($CONFIRM_EACH) {
+        Show-MetadataLine -Label "Before each change" -Value "ask me first"
+    }
+    else {
+        Show-MetadataLine -Label "Before each change" -Value "continue automatically"
+    }
+    Write-Host ""
     
     # Get all folders
+    Write-Progress -Activity "Scanning folders" -Status "Looking for folders in $TARGET_PATH" -PercentComplete -1
     if ($PROCESS_RECURSIVE) {
         $folders = Get-ChildItem -Path $TARGET_PATH -Directory -Recurse
     }
     else {
         $folders = Get-ChildItem -Path $TARGET_PATH -Directory
     }
+    Write-Progress -Activity "Scanning folders" -Completed
     
     if ($folders.Count -eq 0) {
         Write-Host "No folders found in the target path." -ForegroundColor Yellow
@@ -258,64 +430,75 @@ function Main {
     
     # Interactive folder selection mode
     if ($INTERACTIVE_SELECT) {
-        Write-Host "`nAvailable Folders:" -ForegroundColor Cyan
-        Write-Host ("=" * 70)
-        
-        for ($i = 0; $i -lt $folders.Count; $i++) {
-            Write-Host ("{0,3}. {1}" -f ($i + 1), $folders[$i].Name) -ForegroundColor Green
+        $sectionWidth = 78
+        try {
+            $sectionWidth = [Math]::Max(68, $Host.UI.RawUI.WindowSize.Width - 2)
         }
-        
-        Write-Host ("=" * 70)
-        Write-Host "Total: $($folders.Count) folders" -ForegroundColor White
-        Write-Host ""
-        Write-Host "Enter folder numbers (space-separated), 'all', or 'q' to quit:" -ForegroundColor Yellow
-        $selection = Read-Host "Selection"
-        
-        if ($selection -in 'q', 'Q') {
-            Write-Host "Operation cancelled." -ForegroundColor Yellow
-            return
+        catch {
+            # Some hosts do not expose a window size.
         }
+        $sectionSeparator = "-" * $sectionWidth
+
+        Write-Host "`nChoose Folders" -ForegroundColor Cyan
+        Write-Host $sectionSeparator -ForegroundColor Cyan
         
-        if ($selection.ToLower() -eq "all") {
-            # Keep all folders
-            Write-Host "Processing all $($folders.Count) folders...`n" -ForegroundColor Cyan
-        }
-        else {
-            # Parse selected indices
-            $indices = $selection -split '\s+' | Where-Object { $_ -match '^\d+$' } | ForEach-Object { [int]$_ }
-            
-            if ($indices.Count -eq 0) {
-                Write-Host "No valid selections. Exiting." -ForegroundColor Yellow
+        Show-FolderGrid -Folders $folders
+        
+        Write-Host $sectionSeparator -ForegroundColor Cyan
+        Write-Host "Found $($folders.Count) folders." -ForegroundColor White
+        Write-Host "Type folder numbers like: 1 4 7" -ForegroundColor White
+        Write-Host "Type a range like: 1-5 9 12" -ForegroundColor White
+        Write-Host "Type 'all' to select everything, or 'q' to quit safely." -ForegroundColor Yellow
+
+        while ($true) {
+            $selection = Read-Host "Your choice"
+
+            if ($selection -in 'q', 'Q') {
+                Write-Host "Operation cancelled. No changes were made." -ForegroundColor Yellow
                 return
             }
-            
+
+            if ($selection.ToLower() -eq "all") {
+                Write-Host "Processing all $($folders.Count) folders...`n" -ForegroundColor Cyan
+                break
+            }
+
+            $selectionResult = Resolve-FolderSelection -Selection $selection -FolderCount $folders.Count
+
+            if ($selectionResult.InvalidSelections.Count -gt 0) {
+                Write-Host "I could not understand: $($selectionResult.InvalidSelections -join ', ')" -ForegroundColor Yellow
+                Write-Host "Try examples like 1 3 5, 1-5 9, all, or q." -ForegroundColor White
+                continue
+            }
+
+            if ($selectionResult.Indices.Count -eq 0) {
+                Write-Host "No folders selected yet. Try examples like 1 3 5, 1-5 9, all, or q." -ForegroundColor Yellow
+                continue
+            }
+
             # Filter folders based on selection
             $selectedFolders = @()
-            foreach ($idx in $indices) {
-                if ($idx -ge 1 -and $idx -le $folders.Count) {
-                    $selectedFolders += $folders[$idx - 1]
-                }
-                else {
-                    Write-Host "Invalid index: $idx (skipped)" -ForegroundColor Red
-                }
+            foreach ($folderNumber in $selectionResult.Indices) {
+                $selectedFolders += $folders[$folderNumber - 1]
             }
-            
-            if ($selectedFolders.Count -eq 0) {
-                Write-Host "No valid folders selected. Exiting." -ForegroundColor Yellow
-                return
-            }
-            
+
             $folders = $selectedFolders
             Write-Host "Processing $($folders.Count) selected folder(s)...`n" -ForegroundColor Cyan
+            break
         }
     }
     
     $successCount = 0
     $failCount = 0
     $skippedCount = 0
-    
-    foreach ($folder in $folders) {
-        Write-Host "Processing: " -NoNewline
+    $processedCount = 0
+    $userCancelled = $false
+
+    for ($folderIndex = 0; $folderIndex -lt $folders.Count; $folderIndex++) {
+        $folder = $folders[$folderIndex]
+        $progressPercent = [int](($folderIndex / $folders.Count) * 100)
+        Write-Progress -Activity "Processing folders" -Status "Folder $($folderIndex + 1) of $($folders.Count): $($folder.Name)" -PercentComplete $progressPercent
+        Write-Host "Folder $($folderIndex + 1) of $($folders.Count): " -NoNewline
         Write-Host $folder.Name -ForegroundColor Yellow -NoNewline
         Write-Host " ... " -NoNewline
         
@@ -324,17 +507,15 @@ function Main {
             $result = Remove-FolderIcon -FolderPath $folder.FullName
             
             if ($result) {
-                Write-Host "Removed" -ForegroundColor Green -NoNewline
-                Write-Host " [OK]" -ForegroundColor Green
+                Write-Host "custom icon removed [OK]" -ForegroundColor Green
                 $successCount++
             }
             elseif ($result -eq $false -and (Test-Path (Join-Path $folder.FullName "desktop.ini") -Force)) {
-                Write-Host " [FAILED]" -ForegroundColor Red
+                Write-Host "could not remove icon [FAILED]" -ForegroundColor Red
                 $failCount++
             }
             else {
-                Write-Host "No custom icon" -ForegroundColor DarkGray -NoNewline
-                Write-Host " [SKIPPED]" -ForegroundColor DarkYellow
+                Write-Host "no custom icon found [SKIPPED]" -ForegroundColor DarkYellow
                 $skippedCount++
             }
         }
@@ -345,7 +526,7 @@ function Main {
             
             if ($exePath) {
                 $exeFileName = Split-Path $exePath -Leaf
-                Write-Host "Found: " -NoNewline -ForegroundColor Gray
+                Write-Host "found " -NoNewline -ForegroundColor Gray
                 Write-Host $exeFileName -NoNewline -ForegroundColor Green
                 
                 # Ask for confirmation if enabled
@@ -353,39 +534,51 @@ function Main {
                 
                 if ($CONFIRM_EACH) {
                     Write-Host ""
-                    $response = Read-Host "  Use $exeFileName? (Y/n/q or type exe name)"
-                    
-                    if ($response -in 'q', 'Q') {
-                        Write-Host "`nUser cancelled operation." -ForegroundColor Yellow
+                    Write-Host "Press Enter to use it. Type n to skip, q to quit, or type another .exe name." -ForegroundColor Gray
+
+                    while ($true) {
+                        $response = Read-Host "Choice"
+
+                        if ($response -in 'q', 'Q') {
+                            Write-Host "`nOperation cancelled. Changes already completed were kept." -ForegroundColor Yellow
+                            $userCancelled = $true
+                            break
+                        }
+
+                        if ($response -in '', 'y', 'Y') {
+                            $shouldSet = $true
+                            break
+                        }
+
+                        if ($response -in 'n', 'N') {
+                            $shouldSet = $false
+                            break
+                        }
+
+                        # Check if user provided an alternative exe name
+                        if ($response -match '\.exe$') {
+                            $altExe = Get-ChildItem -Path $folder.FullName -Filter $response -Recurse -File -ErrorAction SilentlyContinue |
+                                Select-Object -First 1
+
+                            if ($altExe) {
+                                $exePath = $altExe.FullName
+                                $exeFileName = $altExe.Name
+                                Write-Host "Using $exeFileName instead." -ForegroundColor Cyan
+                                $shouldSet = $true
+                                break
+                            }
+
+                            Write-Host "I could not find '$response' in this folder. Try another .exe name, press Enter to use $exeFileName, type n to skip, or q to quit." -ForegroundColor Yellow
+                            continue
+                        }
+
+                        Write-Host "I did not understand that. Press Enter to use $exeFileName, type n to skip, q to quit, or type another .exe name." -ForegroundColor Yellow
+                    }
+
+                    if ($userCancelled) {
                         break
                     }
-                    
-                    # Check if user provided an alternative exe name
-                    if ($response -match '\.exe$') {
-                        # User provided an exe name, search for it
-                        $altExe = Get-ChildItem -Path $folder.FullName -Filter $response -Recurse -File -ErrorAction SilentlyContinue | 
-                                  Select-Object -First 1
-                        
-                        if ($altExe) {
-                            $exePath = $altExe.FullName
-                            $exeFileName = $altExe.Name
-                            Write-Host "  Using: " -NoNewline -ForegroundColor Gray
-                            Write-Host $exeFileName -NoNewline -ForegroundColor Cyan
-                            $shouldSet = $true
-                        }
-                        else {
-                            Write-Host "  Could not find '$response' in folder" -ForegroundColor Red -NoNewline
-                            $shouldSet = $false
-                        }
-                    }
-                    elseif ($response -in 'n', 'N') {
-                        $shouldSet = $false
-                    }
-                    else {
-                        # Yes or Enter - use detected exe
-                        $shouldSet = ($response -in '', 'y', 'Y')
-                    }
-                    
+
                     Write-Host "  " -NoNewline
                 }
                 
@@ -394,55 +587,62 @@ function Main {
                     $success = Set-FolderIcon -FolderPath $folder.FullName -IconPath $exePath
                     
                     if ($success) {
-                        Write-Host " [OK]" -ForegroundColor Green
+                        Write-Host "icon set [OK]" -ForegroundColor Green
                         $successCount++
                     }
                     else {
-                        Write-Host " [FAILED]" -ForegroundColor Red
+                        Write-Host "could not set icon [FAILED]" -ForegroundColor Red
                         $failCount++
                     }
                 }
                 else {
-                    Write-Host " [SKIPPED by user]" -ForegroundColor DarkYellow
+                    Write-Host "skipped by user [SKIPPED]" -ForegroundColor DarkYellow
                     $skippedCount++
                 }
             }
             else {
-                Write-Host "No executable found" -ForegroundColor DarkGray -NoNewline
-                Write-Host " [SKIPPED]" -ForegroundColor DarkYellow
+                Write-Host "no executable found [SKIPPED]" -ForegroundColor DarkYellow
                 $skippedCount++
             }
         }
+
+        if ($userCancelled) {
+            break
+        }
+
+        $processedCount++
     }
+    Write-Progress -Activity "Processing folders" -Completed
     
     # Summary
     Write-Host "`n=== Summary ===" -ForegroundColor Cyan
-    Write-Host "Total folders: " -NoNewline
+    Write-Host "Selected folders: " -NoNewline
     Write-Host $folders.Count -ForegroundColor White
+    Write-Host "Finished folders: " -NoNewline
+    Write-Host $processedCount -ForegroundColor White
     
-    if ($MODE -eq "remove") {
-        Write-Host "Successfully removed: " -NoNewline
-        Write-Host $successCount -ForegroundColor Green
-    }
-    else {
-        Write-Host "Successfully set: " -NoNewline
-        Write-Host $successCount -ForegroundColor Green
-    }
-    
-    Write-Host "Failed: " -NoNewline
-    Write-Host $failCount -ForegroundColor Red
+    Write-Host "Changed: " -NoNewline
+    Write-Host $successCount -ForegroundColor Green
     Write-Host "Skipped: " -NoNewline
     Write-Host $skippedCount -ForegroundColor Yellow
+    Write-Host "Failed: " -NoNewline
+    Write-Host $failCount -ForegroundColor Red
+
+    if ($userCancelled) {
+        Write-Host "Status: cancelled by user before all selected folders were processed." -ForegroundColor Yellow
+    }
     
     # Refresh Explorer
     Write-Host "`nRefreshing Explorer windows..." -ForegroundColor Gray
     Refresh-Explorer
     
     if ($MODE -eq "remove") {
-        Write-Host "`nDone! Custom icons removed. You may need to refresh the folder view (F5) or restart Explorer." -ForegroundColor Cyan
+        Write-Host "`nDone. Custom icons were removed where possible." -ForegroundColor Cyan
+        Write-Host "Next step: refresh File Explorer with F5 if the view does not update." -ForegroundColor White
     }
     else {
-        Write-Host "`nDone! You may need to refresh the folder view (F5) or restart Explorer to see changes." -ForegroundColor Cyan
+        Write-Host "`nDone. Folder icons were updated where possible." -ForegroundColor Cyan
+        Write-Host "Next step: refresh File Explorer with F5 if icons do not update." -ForegroundColor White
     }
 }
 

@@ -337,9 +337,20 @@ def write_feed(filename, title, entries, max_entries):
 def generate_index_html(feed_info):
     """Generate _site/index.html listing all available feeds."""
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    rows = "\n".join(
-        f'    <li><a href="feeds/{fname}">{label}</a>'
-        f" ({count} repos, {entries} entries)</li>"
+    total_repos = feed_info[0][2] if feed_info else 0
+    total_entries = feed_info[0][3] if feed_info else 0
+    feed_count = len(feed_info)
+    feed_cards = "\n".join(
+        "      <article class=\"feature-card\">\n"
+        f"        <h3>{html.escape(label)}</h3>\n"
+        "        <div class=\"chip-row\" aria-label=\"Feed size\">\n"
+        f"          <span class=\"meta-chip\">{count} repos</span>\n"
+        f"          <span class=\"meta-chip\">{entries} entries</span>\n"
+        "        </div>\n"
+        "        <p>\n"
+        f"          <a class=\"pill primary\" href=\"feeds/{html.escape(fname, quote=True)}\">Open Atom Feed</a>\n"
+        "        </p>\n"
+        "      </article>"
         for fname, label, count, entries in feed_info
     )
     return f"""<!DOCTYPE html>
@@ -348,21 +359,52 @@ def generate_index_html(feed_info):
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>GitHub Stars Release Feeds</title>
-  <style>
-    body {{ font-family: system-ui, sans-serif; max-width: 600px; margin: 2rem auto; padding: 0 1rem; }}
-    a {{ color: #0969da; }}
-    li {{ margin: 0.5rem 0; }}
-  </style>
+  <meta name="description" content="Auto-generated Atom release feeds for {GITHUB_USERNAME}'s starred GitHub repositories.">
+  <link rel="stylesheet" href="https://bikram-agarwal.github.io/assets/style.css?v=20260510-1">
 </head>
-<body>
-  <h1>GitHub Stars Release Feeds</h1>
-  <p>Auto-generated release feeds for
-    <a href="https://github.com/{GITHUB_USERNAME}?tab=stars">{GITHUB_USERNAME}'s starred repos</a>.
-  </p>
-  <ul>
-{rows}
-  </ul>
-  <p><small>Last updated: {timestamp}</small></p>
+<body class="theme-awwsome">
+  <main class="site-shell">
+    <nav class="nav page-nav" aria-label="Site">
+      <a class="pill" href="https://bikram-agarwal.github.io/">Home</a>
+      <a class="pill" href="https://bikram-agarwal.github.io/awwsome-toolkit/">AWWsome Toolkit</a>
+      <a class="pill" href="https://github.com/{GITHUB_USERNAME}/AWWsome-Toolkit">Source</a>
+      <span class="pill primary" aria-current="page">Release Feeds</span>
+    </nav>
+
+    <section class="hero project-hero">
+      <div>
+        <p class="eyebrow">GitHub Stars</p>
+        <h1>Release Feeds</h1>
+        <p class="lede">
+          Auto-generated Atom feeds for
+          <a href="https://github.com/{GITHUB_USERNAME}?tab=stars">{GITHUB_USERNAME}'s starred repos</a>,
+          grouped by starred-list categories and refreshed on a schedule.
+        </p>
+      </div>
+      <aside class="content-card" aria-label="Feed summary">
+        <h2>Current Snapshot</h2>
+        <div class="chip-row">
+          <span class="meta-chip">{feed_count} feeds</span>
+          <span class="meta-chip">{total_repos} repos</span>
+          <span class="meta-chip">{total_entries} latest entries</span>
+        </div>
+      </aside>
+    </section>
+
+    <section class="content-card" aria-label="About these feeds">
+      <p>
+        Use these Atom URLs in any feed reader to follow releases from starred repositories without manually checking each project.
+      </p>
+    </section>
+
+    <section class="feature-grid" aria-label="Available feeds">
+{feed_cards}
+    </section>
+
+    <footer class="site-footer">
+      Last updated: {timestamp}
+    </footer>
+  </main>
 </body>
 </html>"""
 

@@ -33,11 +33,191 @@ if ($Auto) {
 
 # ============================================= COMMON UTILITY FUNCTIONS ==========================================
 
-function Show_ModeMenu {
+function Show_Banner {
+    param(
+        [string]$Title,
+        [ConsoleColor]$Color = [ConsoleColor]::Cyan,
+        [string]$SeparatorCharacter = "-"
+    )
+
+    $borderLine = Get_SeparatorLine -SeparatorCharacter $SeparatorCharacter
+    $bannerWidth = $borderLine.Length
+    $innerWidth = $bannerWidth - 2
+    $titleText = " $($Title.ToUpperInvariant()) "
+
+    if ($titleText.Length -gt $innerWidth) {
+        $titleText = $titleText.Substring(0, $innerWidth)
+    }
+
+    $leftPadding = [Math]::Floor(($innerWidth - $titleText.Length) / 2)
+    $rightPadding = $innerWidth - $titleText.Length - $leftPadding
+    $titleLine = $SeparatorCharacter + (" " * $leftPadding) + $titleText + (" " * $rightPadding) + $SeparatorCharacter
+
     Write-Host ""
-    Write-Host ("="*100) -ForegroundColor Cyan
-    Write-Host " START MENU MANAGER - Select Mode" -ForegroundColor Cyan
-    Write-Host ("="*100) -ForegroundColor Cyan
+    Write-Host $borderLine -ForegroundColor $Color
+    Write-Host $titleLine -ForegroundColor $Color
+    Write-Host $borderLine -ForegroundColor $Color
+}
+
+function Get_SeparatorLine {
+    param(
+        [string]$SeparatorCharacter = "-"
+    )
+
+    $terminalWidth = 80
+    try {
+        $terminalWidth = [Math]::Max(70, $Host.UI.RawUI.WindowSize.Width)
+    }
+    catch {
+        # Some hosts do not expose a window size.
+    }
+
+    if ([string]::IsNullOrWhiteSpace($SeparatorCharacter)) {
+        $SeparatorCharacter = "-"
+    }
+    if ($SeparatorCharacter.Length -gt 1) {
+        $SeparatorCharacter = $SeparatorCharacter.Substring(0, 1)
+    }
+
+    return $SeparatorCharacter * ($terminalWidth - 2)
+}
+
+function Show_SeparatorLine {
+    param(
+        [ConsoleColor]$Color = [ConsoleColor]::Cyan,
+        [string]$SeparatorCharacter = "-"
+    )
+
+    Write-Host (Get_SeparatorLine -SeparatorCharacter $SeparatorCharacter) -ForegroundColor $Color
+}
+
+function Show_StatusLine {
+    param(
+        [string]$Label,
+        [string]$Value,
+        [ConsoleColor]$ValueColor = [ConsoleColor]::White
+    )
+
+    $labelWidth = 19
+    Write-Host ("  " + $Label.PadRight($labelWidth) + " : ") -NoNewline -ForegroundColor Gray
+    Write-Host $Value -ForegroundColor $ValueColor
+}
+
+function Show_ModeExplanation {
+    param(
+        [string]$SelectedMode
+    )
+
+    Show_Banner -Title "What This Mode Does"
+    switch ($SelectedMode) {
+        "READ" {
+            Write-Host "  This only displays your saved Start Menu configuration." -ForegroundColor White
+            Write-Host "  Nothing will be changed on disk." -ForegroundColor Green
+        }
+        "SAVE" {
+            Write-Host "  This scans the current system Start Menu and updates the saved configuration file." -ForegroundColor White
+            Write-Host "  If changes are found, you will be asked before the config is saved." -ForegroundColor Yellow
+        }
+        "ENFORCE" {
+            Write-Host "  This compares your Start Menu with the saved configuration and prepares a cleanup plan." -ForegroundColor White
+            if ($dryRun) {
+                Write-Host "  You will see a preview first. No changes happen until you confirm." -ForegroundColor Yellow
+            } else {
+                Write-Host "  Automated mode is active, so the plan will run without prompts." -ForegroundColor Yellow
+            }
+        }
+    }
+    Write-Host ""
+}
+
+function Show_RunStatus {
+    param(
+        [string]$SelectedMode,
+        [bool]$IsAdmin
+    )
+
+    Show_Banner -Title "Run Status"
+    Show_StatusLine -Label "Mode" -Value $SelectedMode -ValueColor Cyan
+    Show_StatusLine -Label "Run style" -Value $(if ($interactiveMode) { "Manual prompts enabled" } else { "Automated run" }) -ValueColor $(if ($interactiveMode) { [ConsoleColor]::Green } else { [ConsoleColor]::Yellow })
+    Show_StatusLine -Label "Config file" -Value $configPath
+    Show_StatusLine -Label "System Start Menu" -Value $target
+    Show_StatusLine -Label "User Start Menu" -Value $userStartMenuPath
+    Show_StatusLine -Label "Admin access" -Value $(if ($IsAdmin) { "Available" } else { "Not required for this mode" }) -ValueColor $(if ($IsAdmin) { [ConsoleColor]::Green } else { [ConsoleColor]::Gray })
+    Show_StatusLine -Label "Preview mode" -Value $(if ($dryRun) { "Changes require confirmation" } else { "Prompts skipped" }) -ValueColor $(if ($dryRun) { [ConsoleColor]::Green } else { [ConsoleColor]::Yellow })
+    Show_StatusLine -Label "Log file" -Value $logPath
+    Write-Host ""
+}
+
+function Confirm_Action {
+    param(
+        [string]$Message
+    )
+
+    while ($true) {
+        $response = Read-Host "$Message Type Y to continue, N to cancel [N]"
+        $cleanResponse = $response.Trim()
+
+        if ([string]::IsNullOrWhiteSpace($cleanResponse) -or $cleanResponse -match '^(n|no)$') {
+            Write-Host "Cancelled. No changes were made." -ForegroundColor Yellow
+            return $false
+        }
+        if ($cleanResponse -match '^(y|yes)$') {
+            return $true
+        }
+
+        Write-Host "Please type Y to continue or N to cancel." -ForegroundColor Red
+    }
+}
+
+function Show_ColorLegend {
+    Write-Host "Legend:" -ForegroundColor Gray
+    Write-Host "  Green   = safe or additive change" -ForegroundColor Green
+    Write-Host "  Yellow  = needs review" -ForegroundColor Yellow
+    Write-Host "  Magenta = delete or remove" -ForegroundColor Magenta
+    Write-Host ""
+}
+
+function Show_EnforceActionSummary {
+    param(
+        [array]$PlannedMoves,
+        [array]$PlannedDeletes,
+        [array]$EmptyFoldersToDelete,
+        [array]$MissingShortcuts,
+        [array]$PlannedUserMigrations
+    )
+
+    $shortcutsToMigrate = @($PlannedUserMigrations | Where-Object { $_.Type -eq "Migrate" })
+    $userDuplicatesToDelete = @($PlannedUserMigrations | Where-Object { $_.Type -eq "Delete" })
+    $shortcutsToMove = @($PlannedMoves | Where-Object { $_.Type -eq "Move" })
+    $shortcutsToQuarantine = @($PlannedMoves | Where-Object { $_.Type -eq "Quarantine" })
+
+    Show_Banner -Title "Action Summary"
+    Show_StatusLine -Label "User migrations" -Value "$($shortcutsToMigrate.Count) shortcut(s)" -ValueColor Green
+    Show_StatusLine -Label "User duplicates" -Value "$($userDuplicatesToDelete.Count) shortcut(s) to delete" -ValueColor Magenta
+    Show_StatusLine -Label "Move to folders" -Value "$($shortcutsToMove.Count) shortcut(s)" -ValueColor Green
+    Show_StatusLine -Label "Recreate missing" -Value "$($MissingShortcuts.Count) shortcut(s)" -ValueColor Green
+    Show_StatusLine -Label "Quarantine unknown" -Value "$($shortcutsToQuarantine.Count) shortcut(s)" -ValueColor Yellow
+    Show_StatusLine -Label "Delete duplicates" -Value "$($PlannedDeletes.Count) shortcut(s)" -ValueColor Magenta
+    Show_StatusLine -Label "Delete folders" -Value "$($EmptyFoldersToDelete.Count) empty folder(s)" -ValueColor Magenta
+    Write-Host ""
+}
+
+function Show_FinalSummary {
+    param(
+        [string]$Title,
+        [System.Collections.IDictionary]$Details
+    )
+
+    Show_Banner -Title $Title -Color $(if ($Details["Errors"] -and $Details["Errors"] -gt 0) { [ConsoleColor]::Yellow } else { [ConsoleColor]::Green })
+    foreach ($summaryKey in $Details.Keys) {
+        $valueColor = if ($summaryKey -match 'Error' -and $Details[$summaryKey] -gt 0) { [ConsoleColor]::Yellow } else { [ConsoleColor]::White }
+        Show_StatusLine -Label $summaryKey -Value $Details[$summaryKey] -ValueColor $valueColor
+    }
+    Write-Host ""
+}
+
+function Show_ModeMenu {
+    Show_Banner -Title "Start Menu Manager - Select Mode" -SeparatorCharacter "="
     Write-Host ""
     Write-Host "  [1] READ    - Display current config structure" -ForegroundColor White
     Write-Host "  [2] SAVE    - Save current Start Menu to config" -ForegroundColor White
@@ -188,8 +368,10 @@ function Scan_StartMenuShortcuts {
     Write-Host "Scanning Start Menu to generate config file..." -ForegroundColor Gray
     Write_Log "Scanning Start Menu: $TargetPath"
     
+    Write-Progress -Activity "Scanning Start Menu" -Status "Finding shortcuts..." -PercentComplete 5
     $tree = @{}
     $shortcuts = @(Get-ChildItem -Path $TargetPath -Recurse -Filter *.lnk -File -Force)
+    Write-Host "Found $($shortcuts.Count) shortcuts." -ForegroundColor Gray
     
     # Helper to read shortcut details
     $ReadShortcut = {
@@ -206,6 +388,7 @@ function Scan_StartMenuShortcuts {
     if ($PSVersionTable.PSVersion.Major -ge 7) {
         # PowerShell 7+: Parallel processing
         Write-Host "Using parallel processing..." -ForegroundColor Gray
+        Write-Progress -Activity "Scanning Start Menu" -Status "Reading shortcut details..." -PercentComplete 35
         $results = [System.Collections.Concurrent.ConcurrentBag[hashtable]]::new()
         $shortcuts | ForEach-Object -Parallel {
             $shell = New-Object -ComObject WScript.Shell
@@ -227,7 +410,11 @@ function Scan_StartMenuShortcuts {
     } else {
         # PowerShell 5.x: Sequential
         $shell = New-Object -ComObject WScript.Shell
+        $shortcutIndex = 0
         foreach ($item in $shortcuts) {
+            $shortcutIndex++
+            $percentComplete = if ($shortcuts.Count -gt 0) { [Math]::Min(95, [Math]::Floor(($shortcutIndex / $shortcuts.Count) * 90) + 5) } else { 95 }
+            Write-Progress -Activity "Scanning Start Menu" -Status "Reading $($item.Name)" -PercentComplete $percentComplete
             $r = & $ReadShortcut $shell $item $TargetPath
             if (-not $tree[$r.Folder]) { $tree[$r.Folder] = @{} }
             $props = @{}; $r.Keys | Where-Object { $_ -notin 'Folder','Name' } | ForEach-Object { $props[$_] = $r[$_] }
@@ -253,16 +440,16 @@ function Scan_StartMenuShortcuts {
             }
         }
     }
+    Write-Progress -Activity "Scanning Start Menu" -Completed
     return $sorted
 }
 
 function Calculate_ConfigDiff {
     param([PSCustomObject]$OldConfig, [PSCustomObject]$NewConfig)
     
-    Write-Host "`n$("="*100)" -ForegroundColor Magenta
-    Write-Host " CHANGES FROM PREVIOUS CONFIG" -ForegroundColor Magenta
-    Write-Host "$("="*100)`n" -ForegroundColor Magenta
-    Write_Log "`n========== CHANGES FROM PREVIOUS CONFIG =========="
+    Show_Banner -Title "Changes From Previous Config" -Color Magenta
+    Write-Host ""
+    Write_Log "`n---------- CHANGES FROM PREVIOUS CONFIG ----------"
     
     $changesFound = $false
     $oldFolders = @($OldConfig.PSObject.Properties.Name)
@@ -295,7 +482,7 @@ function Calculate_ConfigDiff {
     }
     
     if (-not $changesFound) { Write_Log "No changes detected." -Color Gray -ToScreen; Write-Host "" }
-    Write-Host ("="*100) -ForegroundColor Magenta; Write-Host ""; Write_Log "=================================================="
+    Show_SeparatorLine -Color Magenta; Write-Host ""; Write_Log "--------------------------------------------------"
     return $changesFound
 }
 
@@ -320,6 +507,12 @@ function Save_ConfigFile {
     Write-Host "  Folders: $folderCount" -ForegroundColor Gray
     Write-Host "  Shortcuts: $shortcutCount" -ForegroundColor Gray
     Write_Log "Config file written: $ConfigPath - $folderCount folders, $shortcutCount shortcuts"
+
+    return [PSCustomObject]@{
+        FolderCount = $folderCount
+        ShortcutCount = $shortcutCount
+        ConfigPath = $ConfigPath
+    }
 }
 
 function Create_StartMenuBackup {
@@ -336,16 +529,20 @@ function Create_StartMenuBackup {
     }
     
     Write-Host "Creating $Label backup..." -ForegroundColor Gray
+    Write-Progress -Activity "Creating Backups" -Status "Creating $Label backup..." -PercentComplete 50
     $backupPath = Join-Path $BackupFolder "$($Label)Backup_$(Get-Date -Format 'yyyyMMdd_HHmmss').zip"
     
     try {
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         if (Test-Path $backupPath) { Remove-Item $backupPath -Force }
         [System.IO.Compression.ZipFile]::CreateFromDirectory($TargetPath, $backupPath, [System.IO.Compression.CompressionLevel]::Optimal, $true)
+        Write-Progress -Activity "Creating Backups" -Status "$Label backup complete" -PercentComplete 100
         Write-Host "  ✅ Backup: $backupPath" -ForegroundColor Green
         Write_Log "Backup created: $backupPath"
+        Write-Progress -Activity "Creating Backups" -Completed
         return $backupPath
     } catch {
+        Write-Progress -Activity "Creating Backups" -Completed
         Write-Host "  ❌ Backup failed: $_" -ForegroundColor Red
         Write_Log "Failed to create backup: $_"
         return $null
@@ -381,16 +578,19 @@ function Display_Config {
     }
     
     # Display header with totals
-    Write-Host ""
-    Write-Host ("="*100) -ForegroundColor Cyan
-    Write-Host " $Title" -ForegroundColor Cyan
-    Write-Host ("="*100) -ForegroundColor Cyan
+    Show_Banner -Title $Title
     Write-Host ""
     Write-Host "Total Folders: $($folderData.Count)" -ForegroundColor Gray
     Write-Host "Total Shortcuts: $totalShortcuts" -ForegroundColor Gray
     Write-Host ""
-    Write-Host ("="*100) -ForegroundColor Cyan
+    Show_SeparatorLine
     Write-Host ""
+
+    if ($folderData.Count -eq 0) {
+        Write-Host "No folders are saved in this configuration yet." -ForegroundColor Yellow
+        Write-Host ""
+        return
+    }
 
     # Calculate column layout once for ALL items (ensures alignment across directories)
     $layout = Calculate_ColumnLayout -AllItems $allShortcutNames -IndentSpaces 6
@@ -402,6 +602,8 @@ function Display_Config {
         
         if ($folder.Count -gt 0) {
             Format_InColumns -Items $folder.Shortcuts -IndentSpaces 6 -ColumnWidth $layout.ColumnWidth -NumColumns $layout.NumColumns
+        } else {
+            Write-Host "      (no shortcuts in this folder)" -ForegroundColor DarkGray
         }
         
         Write-Host ""
@@ -413,14 +615,15 @@ function Calculate_ColumnLayout {
         [string[]]$AllItems,
         [int]$IndentSpaces = 6,
         [int]$MinColumnWidth = 25,
-        [int]$ColumnPadding = 4
+        [int]$ColumnPadding = 4,
+        [int]$MaxColumnWidth = 42
     )
     
     # Use cached console width (optimization: avoid repeated console queries)
     $consoleWidth = $script:consoleWidth
     
     # Calculate available width after indent
-    $availableWidth = $consoleWidth - $IndentSpaces
+    $availableWidth = [Math]::Max($MinColumnWidth, $consoleWidth - $IndentSpaces - 2)
     
     # Find the longest item across ALL directories
     $maxItemLength = 0
@@ -430,14 +633,15 @@ function Calculate_ColumnLayout {
         }
     }
     
-    # Column width is the max item length plus padding
-    $columnWidth = $maxItemLength + $ColumnPadding
-    
-    # Ensure minimum column width
-    if ($columnWidth -lt $MinColumnWidth) { $columnWidth = $MinColumnWidth }
+    # Cap preferred width so one long shortcut does not collapse the whole list to 1-2 columns.
+    $preferredColumnWidth = [Math]::Min(
+        [Math]::Max($maxItemLength + $ColumnPadding, $MinColumnWidth),
+        $MaxColumnWidth
+    )
     
     # Calculate how many columns fit
-    $numColumns = [Math]::Max(1, [Math]::Floor($availableWidth / $columnWidth))
+    $numColumns = [Math]::Max(1, [Math]::Floor($availableWidth / $preferredColumnWidth))
+    $columnWidth = [Math]::Max($MinColumnWidth, [Math]::Floor($availableWidth / $numColumns))
     
     return @{
         ColumnWidth = $columnWidth
@@ -467,6 +671,13 @@ function Format_InColumns {
             $index = $row + ($col * $numRows)
             if ($index -lt $Items.Count) {
                 $item = $Items[$index]
+                $contentWidth = if ($col -lt ($NumColumns - 1)) { $ColumnWidth - 2 } else { $ColumnWidth }
+
+                if ($item.Length -gt $contentWidth) {
+                    $trimmedWidth = [Math]::Max(1, $contentWidth - 3)
+                    $item = $item.Substring(0, $trimmedWidth) + "..."
+                }
+
                 # Pad to column width (except last column)
                 if ($col -lt ($NumColumns - 1)) {
                     $line += $item.PadRight($ColumnWidth)
@@ -488,17 +699,26 @@ function Scan_UserShortcutsForMigration {
     $plannedMigrations = [System.Collections.Generic.List[hashtable]]::new()
     
     if (-not (Test-Path $userStartMenuPath)) {
+        Write-Host "User Start Menu path was not found. Skipping user shortcut migration scan." -ForegroundColor Gray
         return $plannedMigrations
     }
     
     # Get all shortcuts from user location (including Startup folder)
+    Write-Progress -Activity "Preparing Enforcement" -Status "Scanning user Start Menu..." -PercentComplete 10
     $userShortcuts = @(Get-ChildItem -Path $userStartMenuPath -Recurse -Filter *.lnk -File -Force)
     
     if ($userShortcuts.Count -eq 0) {
+        Write-Host "No user Start Menu shortcuts found to migrate." -ForegroundColor Gray
+        Write-Progress -Activity "Preparing Enforcement" -Completed
         return $plannedMigrations
     }
     
+    $userShortcutIndex = 0
     foreach ($shortcut in $userShortcuts) {
+        $userShortcutIndex++
+        $percentComplete = [Math]::Min(30, [Math]::Floor(($userShortcutIndex / $userShortcuts.Count) * 20) + 10)
+        Write-Progress -Activity "Preparing Enforcement" -Status "Checking user shortcut $($shortcut.Name)" -PercentComplete $percentComplete
+
         # Calculate relative path from user start menu
         $basePath = $userStartMenuPath.TrimEnd('\') + '\'
         $relativePath = $shortcut.FullName.Substring($basePath.Length)
@@ -519,6 +739,7 @@ function Scan_UserShortcutsForMigration {
         })
     }
     
+    Write-Progress -Activity "Preparing Enforcement" -Completed
     return $plannedMigrations
 }
 
@@ -527,30 +748,31 @@ function Execute_UserMigrations {
     
     if ($PlannedMigrations.Count -eq 0) { return }
     
-    Write-Host ""
-    Write-Host ("="*70) -ForegroundColor Cyan
-    Write-Host " USER START MENU CHANGES" -ForegroundColor Cyan
-    Write-Host ("="*70) -ForegroundColor Cyan
+    Show_Banner -Title "User Start Menu Changes"
     
     # Migrate shortcuts
     Write-Host "`nMigrating shortcuts to system-wide location..." -ForegroundColor Gray
     $migrateCount = 0; $deleteCount = 0
-    foreach ($m in $PlannedMigrations) {
+    $migrationIndex = 0
+    foreach ($migration in $PlannedMigrations) {
+        $migrationIndex++
+        $percentComplete = [Math]::Min(80, [Math]::Floor(($migrationIndex / $PlannedMigrations.Count) * 70) + 10)
+        Write-Progress -Activity "Applying User Start Menu Changes" -Status "Processing $($migration.Name)" -PercentComplete $percentComplete
         try {
-            Ensure_Folder (Split-Path $m.Destination -Parent)
-            if ($m.AlreadyExists) {
-                Remove-Item -Path $m.Source -Force -ErrorAction Stop
-                Write-Host "  🗑️  $($m.Name.PadRight(40)) [Already exists in system]" -ForegroundColor Magenta
-                Write_Log "Deleted user shortcut: $($m.Name) - exists at $($m.RelativePath)"; $deleteCount++
+            Ensure_Folder (Split-Path $migration.Destination -Parent)
+            if ($migration.AlreadyExists) {
+                Remove-Item -Path $migration.Source -Force -ErrorAction Stop
+                Write-Host "  🗑️  $($migration.Name.PadRight(40)) [Already exists in system]" -ForegroundColor Magenta
+                Write_Log "Deleted user shortcut: $($migration.Name) - exists at $($migration.RelativePath)"; $deleteCount++
             } else {
-                Move-Item -Path $m.Source -Destination $m.Destination -Force -ErrorAction Stop
-                Write-Host "  ✅ $($m.Name.PadRight(40)) -> $($m.RelativePath)" -ForegroundColor Green
-                Write_Log "Migrated: $($m.Name) to $($m.RelativePath)"; $migrateCount++
+                Move-Item -Path $migration.Source -Destination $migration.Destination -Force -ErrorAction Stop
+                Write-Host "  ✅ $($migration.Name.PadRight(40)) -> $($migration.RelativePath)" -ForegroundColor Green
+                Write_Log "Migrated: $($migration.Name) to $($migration.RelativePath)"; $migrateCount++
             }
             $SuccessCount.Value++
         } catch {
-            Write-Host "  ❌ $($m.Name.PadRight(40)) [Error: $_]" -ForegroundColor Red
-            Write_Log "Migration failed: $($m.Name) - $_"; $ErrorCount.Value++
+            Write-Host "  ❌ $($migration.Name.PadRight(40)) [Error: $_]" -ForegroundColor Red
+            Write_Log "Migration failed: $($migration.Name) - $_"; $ErrorCount.Value++
         }
     }
     Write-Host "  Migrated: $migrateCount, Deleted (duplicates): $deleteCount" -ForegroundColor Gray
@@ -562,22 +784,28 @@ function Execute_UserMigrations {
     $cleanedCount = 0
     $preservedShown = $false
     
-    Get-ChildItem -Path $userStartMenuPath -Directory -Recurse -Force -ErrorAction SilentlyContinue | 
-        Sort-Object { $_.FullName.Split('\').Count } -Descending | ForEach-Object {
-        if ($_.FullName -eq $startupPath) {
+    $userFolders = @(Get-ChildItem -Path $userStartMenuPath -Directory -Recurse -Force -ErrorAction SilentlyContinue | 
+        Sort-Object { $_.FullName.Split('\').Count } -Descending)
+    $folderIndex = 0
+    foreach ($userFolder in $userFolders) {
+        $folderIndex++
+        $percentComplete = if ($userFolders.Count -gt 0) { [Math]::Min(99, [Math]::Floor(($folderIndex / $userFolders.Count) * 19) + 80) } else { 99 }
+        Write-Progress -Activity "Applying User Start Menu Changes" -Status "Cleaning empty folders..." -PercentComplete $percentComplete
+        if ($userFolder.FullName -eq $startupPath) {
             if (-not $preservedShown) { Write-Host "  📌 Preserved: Programs\Startup" -ForegroundColor Yellow; $preservedShown = $true }
-            return
+            continue
         }
-        $items = @(Get-ChildItem -Path $_.FullName -Force -ErrorAction SilentlyContinue)
+        $items = @(Get-ChildItem -Path $userFolder.FullName -Force -ErrorAction SilentlyContinue)
         if ($items.Count -eq 0) {
             try {
-                Remove-Item -Path $_.FullName -Force -ErrorAction Stop
-                $rel = $_.FullName.Substring($basePath.Length)
+                Remove-Item -Path $userFolder.FullName -Force -ErrorAction Stop
+                $rel = $userFolder.FullName.Substring($basePath.Length)
                 Write-Host "  🗑️  Removed: $rel" -ForegroundColor Magenta
                 Write_Log "Removed empty user folder: $rel"; $cleanedCount++
-            } catch { Write_Log "Could not remove: $($_.FullName) - $_" }
+            } catch { Write_Log "Could not remove: $($userFolder.FullName) - $_" }
         }
     }
+    Write-Progress -Activity "Applying User Start Menu Changes" -Completed
     if ($cleanedCount -eq 0) { Write-Host "  (none)" -ForegroundColor Gray }
     Write-Host ""
 }
@@ -595,9 +823,15 @@ function Build_ConfigLookupTable {
     $allConfigShortcuts = @{}      # Temporary: normalized name -> array of original names
     $expectedMap = @{}             # Final lookup: shortcut name -> folder
     $shortcutDetailsMap = @{}      # Map of shortcut -> details for recreation
+    $configFolders = @($ConfigRaw.PSObject.Properties.Name)
     
     # Single pass: build all data structures at once
-    foreach ($folderKey in $ConfigRaw.PSObject.Properties.Name) {
+    $configFolderIndex = 0
+    foreach ($folderKey in $configFolders) {
+        $configFolderIndex++
+        $percentComplete = if ($configFolders.Count -gt 0) { [Math]::Min(45, [Math]::Floor(($configFolderIndex / $configFolders.Count) * 15) + 30) } else { 45 }
+        Write-Progress -Activity "Preparing Enforcement" -Status "Reading config folder $folderKey" -PercentComplete $percentComplete
+
         # Create folders early
         if ($folderKey -ne "Root" -and -not [string]::IsNullOrEmpty($folderKey)) {
             Ensure_Folder (Join-Path $TargetPath $folderKey)
@@ -619,7 +853,7 @@ function Build_ConfigLookupTable {
     }
     
     # Second mini-pass: build expectedMap now that we know which are variants
-    foreach ($folderKey in $ConfigRaw.PSObject.Properties.Name) {
+    foreach ($folderKey in $configFolders) {
         $shortcuts = $ConfigRaw.$folderKey
         foreach ($sc in $shortcuts.PSObject.Properties.Name) {
             $norm = Normalize_ShortcutName $sc
@@ -633,6 +867,7 @@ function Build_ConfigLookupTable {
             $expectedMap[$keyToUse] = $folderKey
         }
     }
+    Write-Progress -Activity "Preparing Enforcement" -Status "Config lookup ready" -PercentComplete 45
     
     return @{
         AllConfigShortcuts = $allConfigShortcuts
@@ -645,6 +880,7 @@ function Scan_AndOrganizeShortcuts {
     param([string]$TargetPath, [hashtable]$AllConfigShortcuts, [hashtable]$ExpectedMap, [string]$QuarantineFolder)
     
     Write-Host "Scanning shortcuts at $TargetPath..." -ForegroundColor Gray
+    Write-Progress -Activity "Preparing Enforcement" -Status "Scanning system Start Menu..." -PercentComplete 50
     $allShortcuts = @(Get-ChildItem -Path $TargetPath -Recurse -Filter *.lnk -File -Force)
     
     $actualIndex = @{}; $processed = @{}; $foldersToCheck = @{}; $quarantineCounter = @{}
@@ -683,7 +919,12 @@ function Scan_AndOrganizeShortcuts {
 
     Write-Host "Processing $($allShortcuts.Count) shortcuts..." -ForegroundColor Gray
 
+    $systemShortcutIndex = 0
     foreach ($item in $allShortcuts) {
+        $systemShortcutIndex++
+        $percentComplete = if ($allShortcuts.Count -gt 0) { [Math]::Min(80, [Math]::Floor(($systemShortcutIndex / $allShortcuts.Count) * 30) + 50) } else { 80 }
+        Write-Progress -Activity "Preparing Enforcement" -Status "Checking $($item.Name)" -PercentComplete $percentComplete
+
         $norm = Normalize_ShortcutName $item.Name
         $matchKey = Get_ShortcutMatchKey -shortcutName $item.Name -AllConfigShortcuts $AllConfigShortcuts -ExpectedMap $ExpectedMap
         $indexKey = if ($matchKey -and $matchKey -eq $item.Name) { $item.Name } else { $norm }
@@ -764,6 +1005,7 @@ function Scan_AndOrganizeShortcuts {
             }
         }
     }
+    Write-Progress -Activity "Preparing Enforcement" -Status "System scan complete" -PercentComplete 80
     
     return @{ PlannedMoves = $plannedMoves; PlannedDeletes = $plannedDeletes; Processed = $processed; FoldersToCheck = $foldersToCheck }
 }
@@ -773,8 +1015,14 @@ function Detect_MissingShortcuts {
     
     $missingShortcuts = [System.Collections.Generic.List[hashtable]]::new(10)
     $seenMissing = @{}
+    $expectedKeys = @($ExpectedMap.Keys)
     
-    foreach ($normName in $ExpectedMap.Keys) {
+    $expectedKeyIndex = 0
+    foreach ($normName in $expectedKeys) {
+        $expectedKeyIndex++
+        $percentComplete = if ($expectedKeys.Count -gt 0) { [Math]::Min(90, [Math]::Floor(($expectedKeyIndex / $expectedKeys.Count) * 10) + 80) } else { 90 }
+        Write-Progress -Activity "Preparing Enforcement" -Status "Checking for missing shortcuts..." -PercentComplete $percentComplete
+
         if ($Processed.ContainsKey($normName)) { continue }
         $folder = $ExpectedMap[$normName]
         $key = "$folder\$normName"
@@ -831,11 +1079,16 @@ function Detect_EmptyFolders {
     }
     
     # Scan existing folders (deepest first)
-    Get-ChildItem -Path $TargetPath -Directory -Recurse -Force -ErrorAction SilentlyContinue | 
-        Sort-Object { $_.FullName.Split('\').Count } -Descending | ForEach-Object {
-        $folder = $_
+    $foldersToScan = @(Get-ChildItem -Path $TargetPath -Directory -Recurse -Force -ErrorAction SilentlyContinue | 
+        Sort-Object { $_.FullName.Split('\').Count } -Descending)
+    $folderScanIndex = 0
+    foreach ($folder in $foldersToScan) {
+        $folderScanIndex++
+        $percentComplete = if ($foldersToScan.Count -gt 0) { [Math]::Min(98, [Math]::Floor(($folderScanIndex / $foldersToScan.Count) * 8) + 90) } else { 98 }
+        Write-Progress -Activity "Preparing Enforcement" -Status "Checking empty folders..." -PercentComplete $percentComplete
+
         if ($seenFolders.Contains($folder.FullName) -or $preservedFolders.Contains($folder.FullName) -or 
-            $foldersReceivingFiles.Contains($folder.FullName)) { return }
+            $foldersReceivingFiles.Contains($folder.FullName)) { continue }
         
         $items = @(Get-ChildItem -Path $folder.FullName -Force -ErrorAction SilentlyContinue)
         if (& $WillBeEmpty $folder.FullName $items) {
@@ -866,6 +1119,7 @@ function Detect_EmptyFolders {
         }
     }
     
+    Write-Progress -Activity "Preparing Enforcement" -Completed
     return $emptyFoldersToDelete
 }
 
@@ -884,9 +1138,15 @@ function Display_EnforcePreview {
     
     if (-not $DryRun) { return $true }  # Automated mode, proceed
     
-    Write-Host "`n$("="*70)" -ForegroundColor Cyan
-    Write-Host " SUMMARY - Planned Changes" -ForegroundColor Cyan
-    Write-Host "$("="*70)`n" -ForegroundColor Cyan
+    Show_EnforceActionSummary -PlannedMoves $PlannedMoves `
+        -PlannedDeletes $PlannedDeletes `
+        -EmptyFoldersToDelete $EmptyFoldersToDelete `
+        -MissingShortcuts $MissingShortcuts `
+        -PlannedUserMigrations $PlannedUserMigrations
+    Show_ColorLegend
+
+    Show_Banner -Title "Summary - Planned Changes"
+    Write-Host ""
     
     # User migrations (Green = positive, Magenta = deletions)
     $toMigrate = @($PlannedUserMigrations | Where-Object { $_.Type -eq "Migrate" })
@@ -926,9 +1186,8 @@ function Display_EnforcePreview {
         Write_Log "  - $($f.DisplayFolder)"
     }
     
-    Write-Host ("="*70) -ForegroundColor Cyan
-    $response = Read-Host "Do you want to proceed with these changes? (Y/N)"
-    return ($response -eq 'Y' -or $response -eq 'y')
+    Show_SeparatorLine
+    return Confirm_Action -Message "Proceed with these Start Menu changes?"
 }
 
 function Execute_PlannedActions {
@@ -955,7 +1214,13 @@ function Execute_PlannedActions {
     # For recreations, we need a COM shell object
     $shell = if ($ActionType -eq "Recreate") { New-Object -ComObject WScript.Shell } else { $null }
     
+    $actionIndex = 0
     foreach ($action in $Actions) {
+        $actionIndex++
+        $percentComplete = if ($Actions.Count -gt 0) { [Math]::Min(99, [Math]::Floor(($actionIndex / $Actions.Count) * 100)) } else { 99 }
+        $progressName = if ($action.Name) { $action.Name } elseif ($action.DisplayFolder) { $action.DisplayFolder } else { $ActionType }
+        Write-Progress -Activity "Applying $ActionType actions" -Status "Processing $progressName" -PercentComplete $percentComplete
+
         try {
             $displayName = $action.Name
             $logMsg = ""
@@ -1021,6 +1286,7 @@ function Execute_PlannedActions {
     }
     
     if ($shell) { [System.Runtime.Interopservices.Marshal]::ReleaseComObject($shell) | Out-Null }
+    Write-Progress -Activity "Applying $ActionType actions" -Completed
 }
 
 # =============================================================================================================
@@ -1055,31 +1321,53 @@ function Invoke_SaveMode {
     # Ask for confirmation if there are changes and in dry-run mode
     $proceed = $true
     if ($changesFound -and $dryRun) {
-        Write-Host ("="*100) -ForegroundColor Cyan
-        $response = Read-Host "Do you want to save these changes? (Y/N)"
-        $proceed = ($response -eq 'Y' -or $response -eq 'y')
+        Show_SeparatorLine
+        $proceed = Confirm_Action -Message "Save these changes to the Start Menu config?"
         Write-Host ""
     }
     
     if (-not $proceed) {
         Write_Log "Save operation cancelled by user" -Color Yellow -ToScreen
+        Show_FinalSummary -Title "Save Cancelled" -Details ([ordered]@{
+            "Changed" = "Nothing"
+            "Status" = "Config save was cancelled before writing changes"
+            "Config path" = $configPath
+            "Log path" = $logPath
+        })
         return
     }
     
     # Save config file
-    Save_ConfigFile -ConfigTree $sortedTree -ConfigPath $configPath
+    $saveStats = Save_ConfigFile -ConfigTree $sortedTree -ConfigPath $configPath
     
     # Create backup
-    $null = Create_StartMenuBackup -TargetPath $target -BackupFolder (Split-Path $configPath -Parent) -Label "SystemStartMenu"
+    $backupPath = Create_StartMenuBackup -TargetPath $target -BackupFolder (Split-Path $configPath -Parent) -Label "SystemStartMenu"
     
     # Display the saved configuration
     Write-Host ""
     $savedConfig = Get-Content $configPath -Raw | ConvertFrom-Json
     Display_Config -Config $savedConfig -Title "SAVED CONFIGURATION"
+
+    Show_FinalSummary -Title "Save Complete" -Details ([ordered]@{
+        "Changed" = $(if ($changesFound) { "Config updated from current Start Menu" } else { "No previous differences found" })
+        "Folders" = $saveStats.FolderCount
+        "Shortcuts" = $saveStats.ShortcutCount
+        "Config path" = $saveStats.ConfigPath
+        "Backup path" = $(if ($backupPath) { $backupPath } else { "Backup was not created" })
+        "Log path" = $logPath
+        "Next step" = "Use READ to review or ENFORCE to organize the Start Menu"
+    })
 }
 
 function Invoke_ReadMode {
-    if (-not (Test-Path $configPath)) { throw "Config not found: $configPath" }
+    if (-not (Test-Path $configPath)) {
+        Show_FinalSummary -Title "Config Not Found" -Details ([ordered]@{
+            "Status" = "There is no saved Start Menu config yet"
+            "Expected path" = $configPath
+            "Next step" = "Run SAVE first to create the config"
+        })
+        return
+    }
     
     Write-Host "Reading config file..." -ForegroundColor Gray
     Write_Log "Reading config: $configPath"
@@ -1094,7 +1382,14 @@ function Invoke_ReadMode {
 
 
 function Invoke_EnforceMode {
-    if (-not (Test-Path $configPath)) { throw "Config not found: $configPath" }
+    if (-not (Test-Path $configPath)) {
+        Show_FinalSummary -Title "Config Not Found" -Details ([ordered]@{
+            "Status" = "ENFORCE needs a saved config before it can organize the Start Menu"
+            "Expected path" = $configPath
+            "Next step" = "Run SAVE first to create the config"
+        })
+        return
+    }
     
     # First, scan user shortcuts for migration (preview only, no file operations yet)
     $plannedUserMigrations = Scan_UserShortcutsForMigration
@@ -1185,6 +1480,13 @@ function Invoke_EnforceMode {
     
     if (-not $hasChanges) {
         Write_Log "No changes needed - all shortcuts are already in correct locations!" -Color Green -ToScreen
+        Show_FinalSummary -Title "No Changes Needed" -Details ([ordered]@{
+            "Changed" = "Nothing"
+            "Status" = "Your Start Menu already matches the saved config"
+            "Config path" = $configPath
+            "Log path" = $logPath
+            "Next step" = "You can close this window or choose another mode"
+        })
         return
     }
     
@@ -1200,6 +1502,12 @@ function Invoke_EnforceMode {
     # If user cancelled, exit early
     if (-not $proceed) {
         Write_Log "Operation cancelled by user" -Color Yellow -ToScreen
+        Show_FinalSummary -Title "Operation Cancelled" -Details ([ordered]@{
+            "Changed" = "Nothing"
+            "Status" = "Preview was cancelled before any changes were applied"
+            "Config path" = $configPath
+            "Log path" = $logPath
+        })
         return
     }
     
@@ -1209,26 +1517,22 @@ function Invoke_EnforceMode {
     $hasSystemChanges = ($scanResults.PlannedMoves.Count -gt 0 -or $scanResults.PlannedDeletes.Count -gt 0 -or 
                          $missingShortcuts.Count -gt 0 -or $emptyFoldersToDelete.Count -gt 0)
     
-    Write-Host ""
-    Write-Host ("="*70) -ForegroundColor Cyan
-    Write-Host " CREATING BACKUPS" -ForegroundColor Cyan
-    Write-Host ("="*70) -ForegroundColor Cyan
+    Show_Banner -Title "Creating Backups"
     
+    $userBackupPath = $null
+    $systemBackupPath = $null
     if ($hasUserChanges) {
-        $null = Create_StartMenuBackup -TargetPath $userStartMenuPath -BackupFolder $backupFolder -Label "UserStartMenu"
+        $userBackupPath = Create_StartMenuBackup -TargetPath $userStartMenuPath -BackupFolder $backupFolder -Label "UserStartMenu"
     }
     if ($hasSystemChanges) {
-        $null = Create_StartMenuBackup -TargetPath $target -BackupFolder $backupFolder -Label "SystemStartMenu"
+        $systemBackupPath = Create_StartMenuBackup -TargetPath $target -BackupFolder $backupFolder -Label "SystemStartMenu"
     }
     if (-not $hasUserChanges -and -not $hasSystemChanges) {
         Write-Host "  No backups needed (no changes planned)" -ForegroundColor Gray
     }
     
     # Execute all changes
-    Write-Host ""
-    Write-Host ("="*70) -ForegroundColor Cyan
-    Write-Host " EXECUTION" -ForegroundColor Cyan
-    Write-Host ("="*70) -ForegroundColor Cyan
+    Show_Banner -Title "Execution"
     $successCount = 0
     $errorCount = 0
 
@@ -1245,9 +1549,7 @@ function Invoke_EnforceMode {
     $quarantineMoves = @($scanResults.PlannedMoves | Where-Object { $_.Type -eq "Quarantine" })
     
     if ($hasSystemChanges) {
-        Write-Host ("="*70) -ForegroundColor Cyan
-        Write-Host " SYSTEM START MENU CHANGES" -ForegroundColor Cyan
-        Write-Host ("="*70) -ForegroundColor Cyan
+        Show_Banner -Title "System Start Menu Changes"
     }
     
     Execute_PlannedActions -Actions $regularMoves -ActionType "Move" -SuccessCount ([ref]$successCount) -ErrorCount ([ref]$errorCount)
@@ -1260,6 +1562,16 @@ function Invoke_EnforceMode {
     Write-Host ""
     Write_Log "Completed! $successCount successful, $errorCount errors." -Color $(if ($errorCount -eq 0) { "Green" } else { "Yellow" }) -ToScreen
     Write_Log "See log: $logPath" -Color Gray -ToScreen
+    Show_FinalSummary -Title "Enforce Complete" -Details ([ordered]@{
+        "Changed" = "$successCount action(s) completed"
+        "Errors" = $errorCount
+        "User changes" = "$($plannedUserMigrations.Count) planned"
+        "System changes" = "$($regularMoves.Count + $quarantineMoves.Count + $scanResults.PlannedDeletes.Count + $missingShortcuts.Count + $emptyFoldersToDelete.Count) planned"
+        "User backup" = $(if ($userBackupPath) { $userBackupPath } else { "Not needed" })
+        "System backup" = $(if ($systemBackupPath) { $systemBackupPath } else { "Not needed" })
+        "Log path" = $logPath
+        "Next step" = $(if ($errorCount -eq 0) { "Review the Start Menu or use READ to view the saved config" } else { "Review errors in the log before running ENFORCE again" })
+    })
 }
 
 # =============================================================================================================
@@ -1273,31 +1585,40 @@ while ($true) {
             exit 0
         }
     }
+
+    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    Show_ModeExplanation -SelectedMode $currentMode
     
     # Auto-elevate if not running as administrator (required for ENFORCE mode)
     if ($currentMode -eq "ENFORCE") {
-        $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-        
         if (-not $isAdmin) {
             $psExe = if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh.exe' } else { 'powershell.exe' }
             $scriptArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-Mode', $currentMode)
             if ($Auto) { $scriptArgs += '-Auto' }
 
+            Show_Banner -Title "Administrator Access Needed" -Color Yellow
+            Write-Host "  ENFORCE needs administrator access because it changes the system Start Menu." -ForegroundColor White
+            Write-Host "  Windows may ask for permission before the script continues." -ForegroundColor Yellow
+            Write-Host ""
+
             $sudoCmd = Get-Command sudo -ErrorAction SilentlyContinue
             if ($sudoCmd) {
+                Write-Host "Using sudo for same-window elevation..." -ForegroundColor Gray
                 & sudo $psExe @scriptArgs
                 exit 0
             }
-            Write-Host "Sudo is not enabled. Enable it in Settings > System > Advanced for same-window elevation. Elevating in a new window..." -ForegroundColor Yellow
+            Write-Host "Sudo is not enabled, so the elevated run will open in a new window." -ForegroundColor Yellow
+            Write-Host "Tip: enable sudo in Settings > System > Advanced if you want same-window elevation later." -ForegroundColor Gray
             Start-Process $psExe -ArgumentList $scriptArgs -Verb RunAs
             exit 0
         }
     }
     
     # Initialize for current run
-    Write_Log "`n============================== $(Get-Date) ==============================`n"
+    Write_Log "`n------------------------------ $(Get-Date) ------------------------------`n"
     Write_Log "MODE: $currentMode, $(if ($interactiveMode) { 'MANUAL' } else { 'AUTOMATED' })" -Color Cyan -ToScreen
     Write-Host ""
+    Show_RunStatus -SelectedMode $currentMode -IsAdmin $isAdmin
     
     if (-not (Test-Path $target)) { throw "Target not found: $target" }
     
