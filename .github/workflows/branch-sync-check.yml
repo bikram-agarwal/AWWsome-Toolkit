@@ -1,6 +1,10 @@
 name: Branch Sync Check
 on:
   pull_request:
+
+permissions:
+  contents: read
+
 jobs:
   check-sync:
     runs-on: ubuntu-latest
