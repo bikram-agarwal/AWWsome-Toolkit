@@ -12,6 +12,7 @@ import html
 import json
 import os
 import re
+import shutil
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -34,7 +35,16 @@ RELEASES_PAGES_PER_REPO = 1
 GITHUB_API_RETRIES = 3
 GITHUB_API_RETRY_DELAY_SEC = 2
 RETRYABLE_HTTP_CODES = (429, 500, 502, 503, 504)
-OUTPUT_DIR = Path("_site/feeds")
+SITE_DIR = Path("_site")
+OUTPUT_DIR = SITE_DIR / "feeds"
+GITHUB_STARS_LOGO = Path("web/Github_Stars.webp")
+RELEASE_FEEDS_PAGE_URL = f"https://{GITHUB_USERNAME}.github.io/AWWsome-Toolkit/"
+RELEASE_FEEDS_TITLE = "GitHub Stars Release Feeds"
+RELEASE_FEEDS_DESCRIPTION = (
+    "Curated Atom release feeds for useful open-source projects from "
+    f"{GITHUB_USERNAME}'s starred GitHub repositories."
+)
+RELEASE_FEEDS_IMAGE_URL = f"{RELEASE_FEEDS_PAGE_URL}{GITHUB_STARS_LOGO.name}"
 
 ET.register_namespace("", ATOM_NS)
 
@@ -334,77 +344,214 @@ def write_feed(filename, title, entries, max_entries):
     return len(sorted_entries)
 
 
+def build_feed_preview_items(entries):
+    """Return compact display titles for the newest entries in a feed card."""
+    preview_entries = sorted(entries, key=entry_updated_key, reverse=True)[:3]
+    preview_items = []
+    for entry in preview_entries:
+        title_elem = entry.find(f"{{{ATOM_NS}}}title")
+        title_text = title_elem.text if title_elem is not None and title_elem.text else ""
+        repo_text, separator_text, release_title = title_text.partition(": ")
+        if separator_text:
+            repo_name = repo_text.rsplit("/", 1)[-1]
+            preview_text = f"{repo_name} - {release_title}"
+        else:
+            preview_text = title_text.rsplit("/", 1)[-1]
+        if preview_text:
+            preview_items.append(preview_text)
+    return preview_items
+
+
+def render_feed_preview(preview_items):
+    """Render the latest entries panel for a feed card."""
+    display_items = preview_items or ["No releases found yet"]
+    preview_rows = "\n".join(
+        f"            <li><span>{html.escape(preview_item)}</span></li>"
+        for preview_item in display_items
+    )
+    return (
+        "        <div class=\"feed-preview-box\">\n"
+        "          <div class=\"feed-preview-header\">Latest Entries</div>\n"
+        "          <ul class=\"feed-preview-list\">\n"
+        f"{preview_rows}\n"
+        "          </ul>\n"
+        "        </div>"
+    )
+
+
+def render_feed_card(feed_info_entry, is_all_releases=False):
+    """Render one feed card for the generated index page."""
+    feed_filename, label, repo_count, entry_count, preview_items = feed_info_entry
+    card_class = "feature-card all-releases-card" if is_all_releases else "feature-card"
+    return (
+        f"      <article class=\"{card_class}\">\n"
+        "        <div>\n"
+        f"          <h3>{html.escape(label)}</h3>\n"
+        "          <div class=\"chip-row\" aria-label=\"Feed size\">\n"
+        f"            <span class=\"meta-chip\">{repo_count} repos</span>\n"
+        f"            <span class=\"meta-chip\">{entry_count} entries</span>\n"
+        "          </div>\n"
+        "          <div class=\"feed-action-row\">\n"
+        "            <button class=\"meta-chip feed-action\" type=\"button\" "
+        f"data-feed-url=\"{html.escape(PAGES_BASE_URL + '/' + feed_filename, quote=True)}\">"
+        "Copy Feed URL</button>\n"
+        "          </div>\n"
+        "        </div>\n"
+        f"{render_feed_preview(preview_items)}\n"
+        "      </article>"
+    )
+
+
 def generate_index_html(feed_info):
     """Generate _site/index.html listing all available feeds."""
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    total_repos = feed_info[0][2] if feed_info else 0
-    total_entries = feed_info[0][3] if feed_info else 0
-    feed_count = len(feed_info)
-    feed_cards = "\n".join(
-        "      <article class=\"feature-card\">\n"
-        f"        <h3>{html.escape(label)}</h3>\n"
-        "        <div class=\"chip-row\" aria-label=\"Feed size\">\n"
-        f"          <span class=\"meta-chip\">{count} repos</span>\n"
-        f"          <span class=\"meta-chip\">{entries} entries</span>\n"
-        "        </div>\n"
-        "        <p>\n"
-        f"          <a class=\"pill primary\" href=\"feeds/{html.escape(fname, quote=True)}\">Open Atom Feed</a>\n"
-        "        </p>\n"
-        "      </article>"
-        for fname, label, count, entries in feed_info
+    all_release_feeds = [feed for feed in feed_info if feed[1] == "All Releases"]
+    display_feed_info = [feed for feed in feed_info if feed[1] != "All Releases"]
+    my_project_feeds = [feed for feed in display_feed_info if feed[1] == "My Projects"]
+    uncategorized_feeds = [
+        feed for feed in display_feed_info if feed[1] == "Uncategorized"
+    ]
+    display_feed_info = [
+        feed
+        for feed in display_feed_info
+        if feed[1] not in ("My Projects", "Uncategorized")
+    ]
+    windows_index = next(
+        (
+            feed_index
+            for feed_index, feed in enumerate(display_feed_info)
+            if feed[1] == "Windows Apps"
+        ),
+        None,
     )
+    if uncategorized_feeds:
+        if windows_index is None:
+            display_feed_info.extend(uncategorized_feeds)
+        else:
+            display_feed_info[windows_index + 1 : windows_index + 1] = uncategorized_feeds
+    display_feed_info = my_project_feeds + display_feed_info
+
+    all_release_cards = "\n".join(
+        render_feed_card(feed, is_all_releases=True) for feed in all_release_feeds
+    )
+    category_feed_cards = "\n".join(render_feed_card(feed) for feed in display_feed_info)
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>GitHub Stars Release Feeds</title>
-  <meta name="description" content="Auto-generated Atom release feeds for {GITHUB_USERNAME}'s starred GitHub repositories.">
-  <link rel="stylesheet" href="https://bikram-agarwal.github.io/assets/style.css?v=20260510-1">
+  <title>{RELEASE_FEEDS_TITLE}</title>
+  <meta name="description" content="{RELEASE_FEEDS_DESCRIPTION}">
+  <link rel="canonical" href="{RELEASE_FEEDS_PAGE_URL}">
+  <link rel="icon" type="image/webp" href="Github_Stars.webp">
+  <link rel="apple-touch-icon" href="Github_Stars.webp">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="{RELEASE_FEEDS_TITLE}">
+  <meta property="og:description" content="{RELEASE_FEEDS_DESCRIPTION}">
+  <meta property="og:url" content="{RELEASE_FEEDS_PAGE_URL}">
+  <meta property="og:image" content="{RELEASE_FEEDS_IMAGE_URL}">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="{RELEASE_FEEDS_TITLE}">
+  <meta name="twitter:description" content="{RELEASE_FEEDS_DESCRIPTION}">
+  <meta name="twitter:image" content="{RELEASE_FEEDS_IMAGE_URL}">
+  <link rel="stylesheet" href="https://bikram-agarwal.github.io/assets/style.css?v=2-20260511">
+  <script src="https://bikram-agarwal.github.io/assets/site.js?v=2-20260511" defer></script>
+  <script type="application/ld+json">
+    {{
+      "@context": "https://schema.org",
+      "@type": "CreativeWork",
+      "name": "{RELEASE_FEEDS_TITLE}",
+      "description": "{RELEASE_FEEDS_DESCRIPTION}",
+      "url": "{RELEASE_FEEDS_PAGE_URL}",
+      "image": "{RELEASE_FEEDS_IMAGE_URL}",
+      "author": {{
+        "@type": "Person",
+        "name": "Bikram Agarwal",
+        "url": "https://bikram-agarwal.github.io/"
+      }}
+    }}
+  </script>
 </head>
 <body class="theme-awwsome">
   <main class="site-shell">
-    <nav class="nav page-nav" aria-label="Site">
-      <a class="pill" href="https://bikram-agarwal.github.io/">Home</a>
-      <a class="pill" href="https://bikram-agarwal.github.io/awwsome-toolkit/">AWWsome Toolkit</a>
-      <a class="pill" href="https://github.com/{GITHUB_USERNAME}/AWWsome-Toolkit">Source</a>
-      <span class="pill primary" aria-current="page">Release Feeds</span>
+    <nav class="nav page-nav desktop-site-nav" aria-label="Site">
+      <a class="pill" href="../">Home</a>
+      <a class="pill" href="../remember/">Remember</a>
+      <a class="pill" href="../filepipe/">FilePipe</a>
+      <a class="pill" href="../obtainx/">ObtainX</a>
+      <a class="pill" href="../awwsome-toolkit/">AWWsome Toolkit</a>
     </nav>
+    <details class="mobile-site-menu">
+      <summary aria-label="Open site navigation">
+        <span class="menu-icon" aria-hidden="true"><span></span><span></span><span></span></span>
+      </summary>
+      <div class="mobile-menu-panel">
+        <nav class="mobile-menu-links" aria-label="Site menu">
+          <a href="../">Home</a>
+          <a href="../remember/">Remember</a>
+          <a href="../filepipe/">FilePipe</a>
+          <a href="../obtainx/">ObtainX</a>
+          <a href="../awwsome-toolkit/" aria-current="location">AWWsome Toolkit</a>
+        </nav>
+      </div>
+    </details>
 
     <section class="hero project-hero">
-      <div>
-        <p class="eyebrow">GitHub Stars</p>
-        <h1>Release Feeds</h1>
-        <p class="lede">
-          Auto-generated Atom feeds for
-          <a href="https://github.com/{GITHUB_USERNAME}?tab=stars">{GITHUB_USERNAME}'s starred repos</a>,
-          grouped by starred-list categories and refreshed on a schedule.
-        </p>
+      <div class="hero-media">
+        <img class="app-logo" src="Github_Stars.webp" alt="GitHub Stars logo">
+        <nav class="nav" aria-label="GitHub Stars links">
+          <a class="pill primary" href="https://github.com/{GITHUB_USERNAME}/AWWsome-Toolkit/blob/main/web/merge_release_feeds.py" target="_blank" rel="noopener"><img class="pill-icon" src="https://bikram-agarwal.github.io/assets/fav_github.ico" alt="" aria-hidden="true">Source on GitHub</a>
+          <a class="pill secondary-strong" href="https://github.com/{GITHUB_USERNAME}?tab=stars" target="_blank" rel="noopener">⭐ GitHub Stars</a>
+          <a class="pill" href="../awwsome-toolkit/privacy/">Privacy</a>
+          <a class="pill" href="../awwsome-toolkit/terms/">Terms</a>
+        </nav>
       </div>
-      <aside class="content-card" aria-label="Feed summary">
-        <h2>Current Snapshot</h2>
-        <div class="chip-row">
-          <span class="meta-chip">{feed_count} feeds</span>
-          <span class="meta-chip">{total_repos} repos</span>
-          <span class="meta-chip">{total_entries} latest entries</span>
+      <div class="hero-copy">
+        <h1>Release Feeds</h1>
+        <div class="chip-row" aria-label="Feed type">
+          <span class="meta-chip">Android</span>
+          <span class="meta-chip">Windows</span>
+          <span class="meta-chip">Web</span>
         </div>
-      </aside>
+        <p class="lede">
+          These feeds are curated release alerts for useful open-source projects across Android apps, rooting tools, ReVanced/Morphe patches, Windows software, and more. If you want category-based updates from the projects I actively track, without subscribing to dozens of repos individually, these feeds give you a clean, high-signal way to stay current.
+        </p>
+        <section class="content-card">
+          <h2>Why It Exists</h2>
+          <p>GitHub notifications were never built for tracking releases. They mixed issues, PRs, mentions, and discussions with the few updates I actually cared about, so I kept missing new versions of the projects I follow. I built this feed generator to fix that. It pulls release events from my starred repos, groups them by the lists I already maintain, and turns them into clean Atom feeds I can read in a normal feed reader.</p>
+        </section>
+      </div>
     </section>
 
-    <section class="content-card" aria-label="About these feeds">
-      <p>
-        Use these Atom URLs in any feed reader to follow releases from starred repositories without manually checking each project.
-      </p>
+    <div class="feed-info-bar" role="note"><strong>How to use:</strong> Copy a feed URL &rarr; Paste into your RSS reader &rarr; Stay updated.</div>
+
+    <section class="feature-grid feed-grid" aria-label="Available feeds">
+{all_release_cards}
+{category_feed_cards}
     </section>
 
-    <section class="feature-grid" aria-label="Available feeds">
-{feed_cards}
-    </section>
-
-    <footer class="site-footer">
-      Last updated: {timestamp}
+    <footer class="site-footer feed-footer">
+      <span>Made with ❤️ by <a href="https://bikram-agarwal.github.io/">Bikram Agarwal</a></span>
+      <span class="feed-footer-updated">Last updated: {timestamp}</span>
     </footer>
   </main>
+  <script>
+    document.querySelectorAll("[data-feed-url]").forEach((feedButton) => {{
+      const defaultLabel = feedButton.textContent;
+      feedButton.addEventListener("click", async () => {{
+        const feedUrl = feedButton.dataset.feedUrl;
+        try {{
+          await navigator.clipboard.writeText(feedUrl);
+          feedButton.textContent = "Copied!";
+          window.setTimeout(() => {{
+            feedButton.textContent = defaultLabel;
+          }}, 1600);
+        }} catch {{
+          window.prompt("Copy this feed URL:", feedUrl);
+        }}
+      }});
+    }});
+  </script>
 </body>
 </html>"""
 
@@ -445,13 +592,22 @@ def main():
 
     print("=== Step 4: Generate feeds ===")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(GITHUB_STARS_LOGO, SITE_DIR / GITHUB_STARS_LOGO.name)
     feed_info = []
 
     all_entries = [entry for entry_list in repo_entries.values() for entry in entry_list]
     entry_count = write_feed(
         "all.atom", "GitHub Stars - All Releases", all_entries, MAX_ENTRIES_ALL
     )
-    feed_info.append(("all.atom", "All Releases", len(starred_repos), entry_count))
+    feed_info.append(
+        (
+            "all.atom",
+            "All Releases",
+            len(starred_repos),
+            entry_count,
+            build_feed_preview_items(all_entries),
+        )
+    )
     print(f"  all.atom: {entry_count} entries from {len(starred_repos)} repos")
 
     for slug in sorted(categories):
@@ -468,11 +624,17 @@ def main():
             MAX_ENTRIES_PER_CATEGORY,
         )
         feed_info.append(
-            (f"{slug}.atom", info["name"], len(info["repos"]), entry_count)
+            (
+                f"{slug}.atom",
+                info["name"],
+                len(info["repos"]),
+                entry_count,
+                build_feed_preview_items(cat_entries),
+            )
         )
         print(f"  {slug}.atom: {entry_count} entries from {len(info['repos'])} repos")
 
-    Path("_site/index.html").write_text(
+    (SITE_DIR / "index.html").write_text(
         generate_index_html(feed_info), encoding="utf-8"
     )
     print(f"\n  index.html generated")
