@@ -454,8 +454,8 @@ def generate_index_html(feed_info):
   <meta name="twitter:title" content="{RELEASE_FEEDS_TITLE}">
   <meta name="twitter:description" content="{RELEASE_FEEDS_DESCRIPTION}">
   <meta name="twitter:image" content="{RELEASE_FEEDS_IMAGE_URL}">
-  <link rel="stylesheet" href="https://bikram-agarwal.github.io/assets/style.css?v=2-20260511">
-  <script src="https://bikram-agarwal.github.io/assets/site.js?v=2-20260511" defer></script>
+  <link rel="stylesheet" href="https://bikram-agarwal.github.io/assets/style.css?v=3-20260512">
+  <script src="https://bikram-agarwal.github.io/assets/site.js?v=3-20260512" defer></script>
   <script type="application/ld+json">
     {{
       "@context": "https://schema.org",
@@ -480,6 +480,7 @@ def generate_index_html(feed_info):
       <a class="pill" href="../filepipe/">FilePipe</a>
       <a class="pill" href="../obtainx/">ObtainX</a>
       <a class="pill" href="../awwsome-toolkit/">AWWsome Toolkit</a>
+      <a class="pill" href="../archive/">Archive</a>
     </nav>
     <details class="mobile-site-menu">
       <summary aria-label="Open site navigation">
@@ -492,6 +493,7 @@ def generate_index_html(feed_info):
           <a href="../filepipe/">FilePipe</a>
           <a href="../obtainx/">ObtainX</a>
           <a href="../awwsome-toolkit/" aria-current="location">AWWsome Toolkit</a>
+          <a href="../archive/">Archive</a>
         </nav>
       </div>
     </details>
